@@ -12,18 +12,33 @@ def buscar_trabajador_access(dni):
         return {}
 
     conn_str = (
-        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};'
-        f'DBQ={ruta};'
+        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};',
+        f'DBQ={ruta};',
     )
 
-    datos = {}
+    def parse_fecha(valor):
+        if not valor:
+            return None
+        if isinstance(valor, datetime.datetime):
+            return valor.date()
+        if isinstance(valor, datetime.date):
+            return valor
+        if isinstance(valor, str):
+            for fmt in ("%Y-%m-%d", "%d-%m-%Y"):
+                try:
+                    return datetime.datetime.strptime(valor, fmt).date()
+                except ValueError:
+                    continue
+        return None
+
+    datos = {"Nombre": None, "Alta": None, "Baja": None, "Codigo": None}
 
     try:
         conn = pyodbc.connect(conn_str)
         cursor = conn.cursor()
 
         query = f"""
-            SELECT 
+            SELECT
                 APELLIDOS & ' ' & APELLIDOS2 & ', ' & NOMBRE AS NombreCompuesto,
                 FECHAALTA,
                 FECHABAJA,
@@ -36,8 +51,8 @@ def buscar_trabajador_access(dni):
 
         if row:
             datos["Nombre"] = row.NombreCompuesto
-            datos["Alta"] = row.FECHAALTA.date() if row.FECHAALTA else None
-            datos["Baja"] = row.FECHABAJA.date() if row.FECHABAJA else None
+            datos["Alta"] = parse_fecha(row.FECHAALTA)
+            datos["Baja"] = parse_fecha(row.FECHABAJA)
             datos["Codigo"] = row.CODIGO
 
         cursor.close()
@@ -265,50 +280,34 @@ def abrir_gestion_usuarios(db):
                 datos_trab = buscar_trabajador_access(dni)
                 if datos_trab:
                     cambios = {}
-                    if datos_trab["Nombre"] and datos_trab["Nombre"] != data.get("Nombre", ""):
-                        cambios["Nombre"] = datos_trab["Nombre"]
-                        data["Nombre"] = datos_trab["Nombre"]
-                    if datos_trab["Alta"]:
+                    nombre = datos_trab.get("Nombre")
+                    if nombre and nombre != data.get("Nombre", ""):
+                        cambios["Nombre"] = nombre
+                        data["Nombre"] = nombre
+                    alta_fecha = datos_trab.get("Alta")
+                    if alta_fecha:
                         try:
-                            nueva_alta = datetime.datetime.combine(datos_trab["Alta"], datetime.time.min)
+                            nueva_alta = datetime.datetime.combine(alta_fecha, datetime.time.min)
                             if nueva_alta != data.get("Alta"):
                                 cambios["Alta"] = nueva_alta
                                 data["Alta"] = nueva_alta
                         except Exception as e:
                             print(f"⚠️ Error procesando Alta para {dni}: {e}")
 
-                    if datos_trab["Baja"]:
+                    baja_fecha = datos_trab.get("Baja")
+                    if baja_fecha:
                         try:
-                            nueva_baja = datetime.datetime.combine(datos_trab["Baja"], datetime.time.min)
+                            nueva_baja = datetime.datetime.combine(baja_fecha, datetime.time.min)
                             if nueva_baja != data.get("Baja"):
                                 cambios["Baja"] = nueva_baja
                                 data["Baja"] = nueva_baja
                         except Exception as e:
                             print(f"⚠️ Error procesando Baja para {dni}: {e}")
 
-                    if datos_trab["Baja"]:
-                        try:
-                            baja_valor = datos_trab["Baja"]
-                            if isinstance(baja_valor, str):
-                                baja_fecha = datetime.datetime.strptime(baja_valor, "%d-%m-%Y").date()
-                            elif isinstance(baja_valor, datetime.datetime):
-                                baja_fecha = baja_valor.date()
-                            elif isinstance(baja_valor, datetime.date):
-                                baja_fecha = baja_valor
-                            else:
-                                baja_fecha = None
-
-                            if baja_fecha:
-                                nueva_baja = datetime.datetime.combine(baja_fecha, datetime.time.min)
-                                if nueva_baja != data.get("Baja"):
-                                    cambios["Baja"] = nueva_baja
-                                    data["Baja"] = nueva_baja
-                        except Exception as e:
-                            print(f"⚠️ Error procesando Baja para {dni}: {e}")
-
-                    if datos_trab["Codigo"] and datos_trab["Codigo"] != data.get("Codigo"):
-                        cambios["Codigo"] = datos_trab["Codigo"]
-                        data["Codigo"] = datos_trab["Codigo"]
+                    codigo = datos_trab.get("Codigo")
+                    if codigo and codigo != data.get("Codigo"):
+                        cambios["Codigo"] = codigo
+                        data["Codigo"] = codigo
                     if cambios:
                         db.collection("UsuariosAutorizados").document(uid).update(cambios)
                 else:
