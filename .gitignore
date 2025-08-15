@@ -1,0 +1,34 @@
+# ==== ARCHIVOS Y CARPETAS A IGNORAR ====
+
+# Build y binarios
+build/
+dist/
+*.exe
+*.pkg
+*.pdb
+
+# Archivos de caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos temporales
+*.tmp
+*.log
+
+# Configuración de IDEs
+.vscode/
+.idea/
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# Entornos virtuales
+venv/
+.env/
+
+# Claves y credenciales
+sansebassms.json
+notificados.json
