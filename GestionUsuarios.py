@@ -6,7 +6,10 @@ from firebase_admin import auth
 import datetime as dt
 from datetime import datetime, date, timedelta
 from decimal import Decimal
-from typing import Optional, Union
+from typing import Optional, Union, Dict, Iterable
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 
 def _safe_str(v) -> Optional[str]:
@@ -67,88 +70,119 @@ def _parse_date_any(v) -> Optional[date]:
 def _date_to_str_ddmmyyyy(d: Optional[date]) -> Optional[str]:
     return d.strftime("%d-%m-%Y") if isinstance(d, date) else None
 
-def buscar_trabajador_access(dni):
+
+def _chunk_iterable(iterable: Iterable, size: int):
+    """Yield successive chunks of given size from iterable."""
+    chunk = []
+    for item in iterable:
+        chunk.append(item)
+        if len(chunk) == size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
+
+
+def cargar_trabajadores(dnis: Iterable[str]) -> Dict[str, Dict[str, Optional[str]]]:
+    """Lectura única de TRABAJADORES, retornando dict por DNI."""
     ruta = r'X:\ENLACES\Power BI\Campaña\PercecoBi(Campaña).mdb'
+    resultado: Dict[str, Dict[str, Optional[str]]] = {}
     if not os.path.exists(ruta):
         print("❌ Ruta MDB no encontrada.")
-        return {}
+        return resultado
 
     conn_str = (
         r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};',
         f'DBQ={ruta};',
     )
-
-    datos = {"Nombre": None, "Alta": None, "Baja": None, "Codigo": None}
-
+    columnas = "DNI, CODIGO, FECHAALTA, FECHABAJA, APELLIDOS, APELLIDOS2, NOMBRE"
     try:
         conn = pyodbc.connect(conn_str)
         cursor = conn.cursor()
-
-        query = """
-            SELECT APELLIDOS, APELLIDOS2, NOMBRE, FECHAALTA, FECHABAJA, CODIGO
-            FROM TRABAJADORES
-            WHERE DNI = ?
-        """
-        cursor.execute(query, (dni,))
-        row = cursor.fetchone()
-
-        if row:
-            alta_dt = _parse_date_any(getattr(row, "FECHAALTA", None))
-            baja_dt = _parse_date_any(getattr(row, "FECHABAJA", None))
-            codigo_raw = getattr(row, "CODIGO", None)
-
-            ap1 = _safe_str(getattr(row, "APELLIDOS", None)) or ""
-            ap2 = _safe_str(getattr(row, "APELLIDOS2", None)) or ""
-            nom = _safe_str(getattr(row, "NOMBRE", None)) or ""
-            nombre_compuesto = " ".join([t for t in (ap1, ap2, nom) if t]).strip() or "Falta"
-
-            datos = {
-                "Nombre": nombre_compuesto,
-                "Alta": _date_to_str_ddmmyyyy(alta_dt),
-                "Baja": _date_to_str_ddmmyyyy(baja_dt),
-                "Codigo": _safe_str(codigo_raw),
-            }
-
+        for bloque in _chunk_iterable(list(dnis), 1000):
+            placeholders = ','.join('?' for _ in bloque)
+            query = f"SELECT {columnas} FROM TRABAJADORES WHERE DNI IN ({placeholders})"
+            cursor.execute(query, bloque)
+            for row in cursor.fetchall():
+                dni = _safe_str(getattr(row, 'DNI', None))
+                if not dni:
+                    continue
+                alta_dt = _parse_date_any(getattr(row, 'FECHAALTA', None))
+                baja_dt = _parse_date_any(getattr(row, 'FECHABAJA', None))
+                ap1 = _safe_str(getattr(row, 'APELLIDOS', None)) or ''
+                ap2 = _safe_str(getattr(row, 'APELLIDOS2', None)) or ''
+                nom = _safe_str(getattr(row, 'NOMBRE', None)) or ''
+                nombre_compuesto = ' '.join([t for t in (ap1, ap2, nom) if t]).strip() or 'Falta'
+                resultado[dni] = {
+                    'Nombre': nombre_compuesto,
+                    'Alta': _date_to_str_ddmmyyyy(alta_dt),
+                    'Baja': _date_to_str_ddmmyyyy(baja_dt),
+                    'Codigo': _safe_str(getattr(row, 'CODIGO', None))
+                }
         cursor.close()
         conn.close()
-
     except Exception as e:
-        print(f"❌ Error TRABAJADORES MDB para {dni}: {e}")
+        print(f"❌ Error cargando TRABAJADORES: {e}")
+    return resultado
 
-    return datos
 
-def calcular_total_dias_horas(dni, desde_fecha):
+def cargar_datos_ajustados(dnis: Iterable[str], min_alta: date) -> Dict[str, Dict[str, Optional[str]]]:
+    """Lectura única de DATOS_AJUSTADOS con agregados por DNI."""
     ruta = r'X:\\ENLACES\\Power BI\\Campaña\\PercecoBi(Campaña).mdb'
+    datos = defaultdict(lambda: {
+        'UltimoDia': None,
+        '_fechas': set(),
+        'TotalHoras': 0.0,
+        'Puesto': None,
+    })
+    if not os.path.exists(ruta):
+        return datos
+
     conn_str = (
-        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};'
-        f'DBQ={ruta};'
+        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};',
+        f'DBQ={ruta};',
     )
     try:
         conn = pyodbc.connect(conn_str)
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT FECHA, HORAS, HORASEXT, CATEGORIA
-            FROM DATOS_AJUSTADOS
-            WHERE DNI = ?
-              AND FECHA >= ?
-        """, (dni, desde_fecha))
-        dias = 0
-        total_horas = 0
-        categoria = None
-        ultima_fecha = None
-        for row in cursor.fetchall():
-            dias += 1
-            total_horas += float(row.HORAS or 0) + float(row.HORASEXT or 0)
-            if not categoria and row.CATEGORIA:
-                categoria = row.CATEGORIA.strip()
-            if row.FECHA:
-                if not ultima_fecha or row.FECHA > ultima_fecha:
-                    ultima_fecha = row.FECHA
+        for bloque in _chunk_iterable(list(dnis), 1000):
+            placeholders = ','.join('?' for _ in bloque)
+            params = [min_alta] + list(bloque)
+            query = (
+                f"SELECT DNI, FECHA, HORAS, HORASEXT, CATEGORIA FROM DATOS_AJUSTADOS "
+                f"WHERE FECHA >= ? AND DNI IN ({placeholders})"
+            )
+            cursor.execute(query, params)
+            for row in cursor.fetchall():
+                dni = _safe_str(getattr(row, 'DNI', None))
+                if not dni:
+                    continue
+                fecha = _parse_date_any(getattr(row, 'FECHA', None))
+                horas = float(getattr(row, 'HORAS', 0) or 0) + float(getattr(row, 'HORASEXT', 0) or 0)
+                categoria = _safe_str(getattr(row, 'CATEGORIA', None))
+                info = datos[dni]
+                if fecha:
+                    info['_fechas'].add(fecha)
+                    if not info['UltimoDia'] or fecha > info['UltimoDia']:
+                        info['UltimoDia'] = fecha
+                info['TotalHoras'] += horas
+                if categoria:
+                    info['Puesto'] = categoria
+        cursor.close()
         conn.close()
-        return dias, round(total_horas, 2), categoria, ultima_fecha
     except Exception as e:
-        print(f"❌ Error DATOS_AJUSTADOS para {dni}: {e}")
-        return 0, 0.0, None, None
+        print(f"❌ Error cargando DATOS_AJUSTADOS: {e}")
+
+    final = {}
+    for dni, info in datos.items():
+        final[dni] = {
+            'UltimoDia': info['UltimoDia'],
+            'TotalDia': len(info['_fechas']),
+            'TotalHoras': round(info['TotalHoras'], 2),
+            'Puesto': info['Puesto'],
+        }
+    return final
+
 def abrir_gestion_usuarios(db):
     ventana = tk.Toplevel()
     ventana.title("👥 Gestión de Usuarios")
@@ -317,40 +351,44 @@ def abrir_gestion_usuarios(db):
         datos_originales = []
         tabla.delete(*tabla.get_children())
 
-        usuarios = db.collection("UsuariosAutorizados").stream()
-        hoy = dt.datetime.now().date()
+        t0 = time.time()
+        usuarios_docs = list(db.collection("UsuariosAutorizados").stream())
+        t1 = time.time()
 
-        for doc in usuarios:
+        hoy = dt.datetime.now().date()
+        dnis = set()
+        min_alta = hoy - timedelta(days=365)
+        for doc in usuarios_docs:
+            data = doc.to_dict()
+            dni = _safe_str(data.get("Dni"))
+            if dni:
+                dnis.add(dni)
+                alta = _parse_date_any(data.get("Alta"))
+                if alta and alta < min_alta:
+                    min_alta = alta
+
+        trab_by_dni = cargar_trabajadores(dnis)
+        t2 = time.time()
+        ajust_by_dni = cargar_datos_ajustados(dnis, min_alta)
+        t3 = time.time()
+
+        total = len(usuarios_docs)
+
+        def procesar_doc(doc):
             uid = doc.id
             data = doc.to_dict()
             actualiza = {}
-
             dni = _safe_str(data.get("Dni")) or "Falta"
             data["Dni"] = dni
 
-            # TRABAJADORES
             if dni != "Falta":
-                datos_trab = buscar_trabajador_access(dni)
-                if datos_trab:
-                    cambios = {}
-                    nombre = datos_trab.get("Nombre")
-                    if nombre and nombre != data.get("Nombre", ""):
-                        cambios["Nombre"] = nombre
-                        data["Nombre"] = nombre
-                    alta_str = datos_trab.get("Alta")
-                    if alta_str and alta_str != data.get("Alta"):
-                        cambios["Alta"] = alta_str
-                        data["Alta"] = alta_str
-                    baja_str = datos_trab.get("Baja")
-                    if baja_str and baja_str != data.get("Baja"):
-                        cambios["Baja"] = baja_str
-                        data["Baja"] = baja_str
-                    codigo = datos_trab.get("Codigo")
-                    if codigo and codigo != data.get("Codigo"):
-                        cambios["Codigo"] = codigo
-                        data["Codigo"] = codigo
-                    if cambios:
-                        db.collection("UsuariosAutorizados").document(uid).update(cambios)
+                trab = trab_by_dni.get(dni, {})
+                if trab:
+                    for campo in ("Nombre", "Alta", "Baja", "Codigo"):
+                        val = trab.get(campo)
+                        if val and val != data.get(campo):
+                            actualiza[campo] = val
+                            data[campo] = val
                 else:
                     actualiza["Mensaje"] = False
                     actualiza["Seleccionable"] = False
@@ -362,27 +400,30 @@ def abrir_gestion_usuarios(db):
                 data["Mensaje"] = False
                 data["Seleccionable"] = False
 
-            # DATOS_AJUSTADOS
-            desde_fecha = _parse_date_any(data.get("Alta")) or hoy
-            total_dias, total_horas, categoria, ultima_fecha = calcular_total_dias_horas(dni, desde_fecha)
-            if total_dias != data.get("TotalDia"):
-                actualiza["TotalDia"] = total_dias
-                data["TotalDia"] = total_dias
-            if round(total_horas, 2) != round(float(data.get("TotalHoras", 0.0)), 2):
-                actualiza["TotalHoras"] = round(total_horas, 2)
-                data["TotalHoras"] = total_horas
-            if categoria and categoria != data.get("Puesto"):
-                actualiza["Puesto"] = categoria
-                data["Puesto"] = categoria
-            if ultima_fecha:
-                ultima_str = _date_to_str_ddmmyyyy(ultima_fecha)
-                if ultima_str != data.get("UltimoDia"):
-                    actualiza["UltimoDia"] = ultima_str
-                    data["UltimoDia"] = ultima_str
-            if actualiza:
-                db.collection("UsuariosAutorizados").document(uid).update(actualiza)
+            ajust = ajust_by_dni.get(dni, {})
+            if ajust:
+                ultima = ajust.get("UltimoDia")
+                if ultima:
+                    ultima_str = _date_to_str_ddmmyyyy(ultima)
+                    if ultima_str != data.get("UltimoDia"):
+                        actualiza["UltimoDia"] = ultima_str
+                        data["UltimoDia"] = ultima_str
+                if ajust.get("TotalDia") != data.get("TotalDia"):
+                    actualiza["TotalDia"] = ajust.get("TotalDia")
+                    data["TotalDia"] = ajust.get("TotalDia")
+                if round(float(ajust.get("TotalHoras", 0)), 2) != round(float(data.get("TotalHoras", 0)), 2):
+                    actualiza["TotalHoras"] = ajust.get("TotalHoras")
+                    data["TotalHoras"] = ajust.get("TotalHoras")
+                puesto = ajust.get("Puesto")
+                if puesto and puesto != data.get("Puesto"):
+                    actualiza["Puesto"] = puesto
+                    data["Puesto"] = puesto
+            if data.get("Baja"):
+                actualiza["Mensaje"] = False
+                actualiza["Seleccionable"] = False
+                data["Mensaje"] = False
+                data["Seleccionable"] = False
 
-            # Default values
             data["Nombre"] = data.get("Nombre", "Falta")
             data["Telefono"] = data.get("Telefono", "")
             data["correo"] = data.get("correo", "")
@@ -399,14 +440,37 @@ def abrir_gestion_usuarios(db):
             data["Baja"] = data.get("Baja")
             data["Codigo"] = _safe_str(data.get("Codigo")) or ""
 
-            fila = {
-                "UID": uid,
-                **{col: data.get(col, "") for col in columnas}
-            }
+            fila = {"UID": uid, **{col: data.get(col, "") for col in columnas}}
+            return uid, fila, actualiza
 
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            resultados = list(ex.map(procesar_doc, usuarios_docs))
+        t4 = time.time()
+
+        batch = db.batch()
+        ops = 0
+        for idx, (uid, fila, actualiza) in enumerate(resultados, start=1):
+            if actualiza:
+                ref = db.collection("UsuariosAutorizados").document(uid)
+                batch.update(ref, actualiza)
+                ops += 1
+                if ops % 400 == 0:
+                    batch.commit()
+                    batch = db.batch()
             datos_originales.append(fila)
             tabla.insert("", "end", iid=uid, values=[fila[col] for col in columnas])
-    
+            if idx % 200 == 0:
+                print(f"Procesados {idx}/{total}")
+        if ops % 400:
+            batch.commit()
+        t5 = time.time()
+
+        print(
+            f"⏱️ t0→t1 Firebase {t1 - t0:.2f}s | t1→t2 TRAB {t2 - t1:.2f}s | "
+            f"t2→t3 AJUST {t3 - t2:.2f}s | t3→t4 proc {t4 - t3:.2f}s | "
+            f"t4→t5 commit {t5 - t4:.2f}s | total {t5 - t0:.2f}s"
+        )
+
 
     def eliminar_usuario():
         seleccion = tabla.focus()
