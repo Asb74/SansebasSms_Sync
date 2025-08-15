@@ -1,9 +1,71 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import datetime
 import pyodbc
 import os
 from firebase_admin import auth
+import datetime as dt
+from datetime import datetime, date, timedelta
+from decimal import Decimal
+from typing import Optional, Union
+
+
+def _safe_str(v) -> Optional[str]:
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        return s if s else None
+    if isinstance(v, (int, float, Decimal)):
+        return str(v)
+    if isinstance(v, (bytes, bytearray)):
+        for enc in ("utf-8", "latin-1", "cp1252"):
+            try:
+                s = v.decode(enc, errors="ignore").strip()
+                return s if s else None
+            except Exception:
+                continue
+        return None
+    s = str(v).strip()
+    return s if s else None
+
+
+def _oa_date_to_date(v: Union[float, Decimal]) -> Optional[date]:
+    try:
+        base = datetime(1899, 12, 30)
+        return (base + timedelta(days=int(float(v)))).date()
+    except Exception:
+        return None
+
+
+def _parse_date_any(v) -> Optional[date]:
+    if v is None:
+        return None
+    if isinstance(v, date) and not isinstance(v, datetime):
+        return v
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, (float, Decimal)):
+        d = _oa_date_to_date(v)
+        if d:
+            return d
+    s = _safe_str(v)
+    if not s:
+        return None
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            pass
+    if s.isdigit() and len(s) == 8:
+        try:
+            return datetime.strptime(s, "%Y%m%d").date()
+        except ValueError:
+            pass
+    return None
+
+
+def _date_to_str_ddmmyyyy(d: Optional[date]) -> Optional[str]:
+    return d.strftime("%d-%m-%Y") if isinstance(d, date) else None
 
 def buscar_trabajador_access(dni):
     ruta = r'X:\ENLACES\Power BI\Campaña\PercecoBi(Campaña).mdb'
@@ -16,33 +78,14 @@ def buscar_trabajador_access(dni):
         f'DBQ={ruta};',
     )
 
-    def parse_fecha(valor):
-        if not valor:
-            return None
-        if isinstance(valor, datetime.datetime):
-            return valor.date()
-        if isinstance(valor, datetime.date):
-            return valor
-        if isinstance(valor, str):
-            for fmt in ("%Y-%m-%d", "%d-%m-%Y"):
-                try:
-                    return datetime.datetime.strptime(valor, fmt).date()
-                except ValueError:
-                    continue
-        return None
-
     datos = {"Nombre": None, "Alta": None, "Baja": None, "Codigo": None}
 
     try:
         conn = pyodbc.connect(conn_str)
         cursor = conn.cursor()
 
-        query = f"""
-            SELECT
-                APELLIDOS & ' ' & APELLIDOS2 & ', ' & NOMBRE AS NombreCompuesto,
-                FECHAALTA,
-                FECHABAJA,
-                CODIGO
+        query = """
+            SELECT APELLIDOS, APELLIDOS2, NOMBRE, FECHAALTA, FECHABAJA, CODIGO
             FROM TRABAJADORES
             WHERE DNI = ?
         """
@@ -50,10 +93,21 @@ def buscar_trabajador_access(dni):
         row = cursor.fetchone()
 
         if row:
-            datos["Nombre"] = row.NombreCompuesto
-            datos["Alta"] = parse_fecha(row.FECHAALTA)
-            datos["Baja"] = parse_fecha(row.FECHABAJA)
-            datos["Codigo"] = row.CODIGO
+            alta_dt = _parse_date_any(getattr(row, "FECHAALTA", None))
+            baja_dt = _parse_date_any(getattr(row, "FECHABAJA", None))
+            codigo_raw = getattr(row, "CODIGO", None)
+
+            ap1 = _safe_str(getattr(row, "APELLIDOS", None)) or ""
+            ap2 = _safe_str(getattr(row, "APELLIDOS2", None)) or ""
+            nom = _safe_str(getattr(row, "NOMBRE", None)) or ""
+            nombre_compuesto = " ".join([t for t in (ap1, ap2, nom) if t]).strip() or "Falta"
+
+            datos = {
+                "Nombre": nombre_compuesto,
+                "Alta": _date_to_str_ddmmyyyy(alta_dt),
+                "Baja": _date_to_str_ddmmyyyy(baja_dt),
+                "Codigo": _safe_str(codigo_raw),
+            }
 
         cursor.close()
         conn.close()
@@ -166,7 +220,7 @@ def abrir_gestion_usuarios(db):
                 return float(valor)
             except:
                 try:
-                    return datetime.datetime.strptime(valor, "%d-%m-%Y")
+                    return datetime.strptime(valor, "%d-%m-%Y")
                 except:
                     return valor.lower()
 
@@ -218,12 +272,12 @@ def abrir_gestion_usuarios(db):
             doc_ref = db.collection("UsuariosAutorizados").document(uid)
             if campo in ["Mensaje", "Seleccionable", "Valor"]:
                 valor = valor == "True"
-            elif campo in ["TotalDia", "Codigo"]:
+            elif campo in ["TotalDia"]:
                 valor = int(valor)
             elif campo in ["TotalHoras"]:
                 valor = float(valor)
-            elif campo in ["Alta", "UltimoDia", "Baja"]:
-                valor = datetime.datetime.strptime(valor, "%d-%m-%Y")
+            elif campo in ["Alta", "UltimoDia", "Baja", "Codigo"]:
+                valor = _safe_str(valor)
             doc_ref.update({campo: valor})
         except Exception as e:
             print(f"⚠️ Error al guardar {campo} de {uid}: {e}")
@@ -264,15 +318,14 @@ def abrir_gestion_usuarios(db):
         tabla.delete(*tabla.get_children())
 
         usuarios = db.collection("UsuariosAutorizados").stream()
-        hoy = datetime.datetime.now().date()
-        hoy_dt = datetime.datetime.combine(hoy, datetime.time.min)
+        hoy = dt.datetime.now().date()
 
         for doc in usuarios:
             uid = doc.id
             data = doc.to_dict()
             actualiza = {}
 
-            dni = data.get("Dni", "").strip() or "Falta"
+            dni = _safe_str(data.get("Dni")) or "Falta"
             data["Dni"] = dni
 
             # TRABAJADORES
@@ -284,26 +337,14 @@ def abrir_gestion_usuarios(db):
                     if nombre and nombre != data.get("Nombre", ""):
                         cambios["Nombre"] = nombre
                         data["Nombre"] = nombre
-                    alta_fecha = datos_trab.get("Alta")
-                    if alta_fecha:
-                        try:
-                            nueva_alta = datetime.datetime.combine(alta_fecha, datetime.time.min)
-                            if nueva_alta != data.get("Alta"):
-                                cambios["Alta"] = nueva_alta
-                                data["Alta"] = nueva_alta
-                        except Exception as e:
-                            print(f"⚠️ Error procesando Alta para {dni}: {e}")
-
-                    baja_fecha = datos_trab.get("Baja")
-                    if baja_fecha:
-                        try:
-                            nueva_baja = datetime.datetime.combine(baja_fecha, datetime.time.min)
-                            if nueva_baja != data.get("Baja"):
-                                cambios["Baja"] = nueva_baja
-                                data["Baja"] = nueva_baja
-                        except Exception as e:
-                            print(f"⚠️ Error procesando Baja para {dni}: {e}")
-
+                    alta_str = datos_trab.get("Alta")
+                    if alta_str and alta_str != data.get("Alta"):
+                        cambios["Alta"] = alta_str
+                        data["Alta"] = alta_str
+                    baja_str = datos_trab.get("Baja")
+                    if baja_str and baja_str != data.get("Baja"):
+                        cambios["Baja"] = baja_str
+                        data["Baja"] = baja_str
                     codigo = datos_trab.get("Codigo")
                     if codigo and codigo != data.get("Codigo"):
                         cambios["Codigo"] = codigo
@@ -313,16 +354,16 @@ def abrir_gestion_usuarios(db):
                 else:
                     actualiza["Mensaje"] = False
                     actualiza["Seleccionable"] = False
-                    data["Mensaje"] = "False"
-                    data["Seleccionable"] = "False"
+                    data["Mensaje"] = False
+                    data["Seleccionable"] = False
             else:
                 actualiza["Mensaje"] = False
                 actualiza["Seleccionable"] = False
-                data["Mensaje"] = "False"
-                data["Seleccionable"] = "False"
+                data["Mensaje"] = False
+                data["Seleccionable"] = False
 
             # DATOS_AJUSTADOS
-            desde_fecha = data.get("Alta", hoy_dt).date()
+            desde_fecha = _parse_date_any(data.get("Alta")) or hoy
             total_dias, total_horas, categoria, ultima_fecha = calcular_total_dias_horas(dni, desde_fecha)
             if total_dias != data.get("TotalDia"):
                 actualiza["TotalDia"] = total_dias
@@ -334,13 +375,12 @@ def abrir_gestion_usuarios(db):
                 actualiza["Puesto"] = categoria
                 data["Puesto"] = categoria
             if ultima_fecha:
-                ultima_dt = datetime.datetime.combine(ultima_fecha, datetime.time.min)
-                if ultima_dt != data.get("UltimoDia"):
-                    actualiza["UltimoDia"] = ultima_dt
-                    data["UltimoDia"] = ultima_dt
+                ultima_str = _date_to_str_ddmmyyyy(ultima_fecha)
+                if ultima_str != data.get("UltimoDia"):
+                    actualiza["UltimoDia"] = ultima_str
+                    data["UltimoDia"] = ultima_str
             if actualiza:
                 db.collection("UsuariosAutorizados").document(uid).update(actualiza)
-
 
             # Default values
             data["Nombre"] = data.get("Nombre", "Falta")
@@ -352,16 +392,16 @@ def abrir_gestion_usuarios(db):
             data["Mensaje"] = str(data.get("Mensaje", False))
             data["Seleccionable"] = str(data.get("Seleccionable", True))
             data["Valor"] = str(data.get("Valor", False))
-            data["Alta"] = data.get("Alta", hoy_dt)
-            data["UltimoDia"] = data.get("UltimoDia", hoy_dt)
+            data["Alta"] = data.get("Alta") or _date_to_str_ddmmyyyy(hoy)
+            data["UltimoDia"] = data.get("UltimoDia") or _date_to_str_ddmmyyyy(hoy)
             data["TotalDia"] = str(data.get("TotalDia", "0"))
             data["TotalHoras"] = str(data.get("TotalHoras", "0.0"))
-            data["Baja"] = data.get("Baja", "")
-            data["Codigo"] = str(data.get("Codigo", ""))
+            data["Baja"] = data.get("Baja")
+            data["Codigo"] = _safe_str(data.get("Codigo")) or ""
 
             fila = {
                 "UID": uid,
-                **{col: data.get(col, "") if col not in ["Alta", "UltimoDia", "Baja"] else data[col].strftime("%d-%m-%Y") if data[col] else "" for col in columnas}
+                **{col: data.get(col, "") for col in columnas}
             }
 
             datos_originales.append(fila)
@@ -408,7 +448,7 @@ def abrir_gestion_usuarios(db):
             for campo in ["Mensaje", "Seleccionable", "Valor"]:
                 datos[campo] = datos[campo] == "True"
 
-            for campo in ["TotalDia", "Codigo"]:
+            for campo in ["TotalDia"]:
                 try:
                     datos[campo] = int(datos[campo])
                 except:
@@ -420,11 +460,8 @@ def abrir_gestion_usuarios(db):
                 except:
                     datos[campo] = 0.0
 
-            for campo in ["Alta", "UltimoDia", "Baja"]:
-                try:
-                    datos[campo] = datetime.datetime.strptime(datos[campo], "%d-%m-%Y")
-                except:
-                    datos[campo] = None
+            for campo in ["Alta", "UltimoDia", "Baja", "Codigo"]:
+                datos[campo] = _safe_str(datos.get(campo))
 
             try:
                 db.collection("UsuariosAutorizados").document(uid).update(datos)
