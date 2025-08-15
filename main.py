@@ -12,6 +12,43 @@ from PIL import Image, ImageTk
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 from GestionUsuarios import abrir_gestion_usuarios
+import re
+from decimal import Decimal
+from typing import Optional
+from google.cloud.firestore_v1.base_query import FieldFilter
+
+
+def _safe_str(v) -> Optional[str]:
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        return s if s else None
+    if isinstance(v, (int, float, Decimal)):
+        return str(v)
+    if isinstance(v, (bytes, bytearray)):
+        for enc in ("utf-8", "latin-1", "cp1252"):
+            try:
+                s = v.decode(enc, errors="ignore").strip()
+                return s if s else None
+            except Exception:
+                continue
+        return None
+    s = str(v).strip()
+    return s if s else None
+
+
+_FCM_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-:.]{100,}$")
+
+
+def _is_valid_fcm_token(token: Optional[str]) -> bool:
+    if not token:
+        return False
+    if not isinstance(token, str):
+        token = _safe_str(token)
+        if not token:
+            return False
+    return bool(_FCM_TOKEN_RE.match(token))
 
 
 # 🔧 Configuración inicial
@@ -46,7 +83,7 @@ def obtener_token_oauth():
 
 def enviar_notificaciones_push():
     try:
-        snapshot = db.collection("Mensajes").where("estado", "==", "Pendiente").get()
+        snapshot = db.collection("Mensajes").where(filter=FieldFilter("estado", "==", "Pendiente")).get()
         if not snapshot:
             messagebox.showinfo("Notificaciones", "No hay mensajes pendientes.")
             return
@@ -76,7 +113,8 @@ def enviar_notificaciones_push():
 
             usuario_data = usuario_doc.to_dict()
             token = usuario_data.get("fcmToken")
-            if not token:
+            if not _is_valid_fcm_token(token):
+                print(f"⚠️ Token FCM inválido para {uid}, se omite.")
                 continue
 
             payload = {
@@ -104,6 +142,9 @@ def enviar_notificaciones_push():
                 nuevos.append(doc.id)
             else:
                 print(f"❌ Error al enviar a {uid}: {response.text}")
+                if response.status_code == 400 and "INVALID_ARGUMENT" in response.text:
+                    db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None})
+                    print(f"🧹 fcmToken inválido limpiado para {uid}")
 
         if nuevos:
             notificados.extend(nuevos)
@@ -120,7 +161,7 @@ def crear_mensajes_para_todos():
         return
 
     try:
-        usuarios = db.collection("UsuariosAutorizados").where("Mensaje", "==", True).get()
+        usuarios = db.collection("UsuariosAutorizados").where(filter=FieldFilter("Mensaje", "==", True)).get()
         if not usuarios:
             messagebox.showinfo("Sin usuarios", "No hay usuarios con 'Mensaje = true'.")
             return
@@ -271,7 +312,7 @@ def revisar_mensajes():
                 notificados = json.load(f)
 
         nuevos = []
-        snapshot = db.collection("Mensajes").where("estado", "==", "Pendiente").get()
+        snapshot = db.collection("Mensajes").where(filter=FieldFilter("estado", "==", "Pendiente")).get()
         for doc in snapshot:
             if doc.id not in notificados:
                 mensaje = doc.to_dict().get("mensaje", "(sin mensaje)")
