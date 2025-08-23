@@ -5,6 +5,8 @@ import os
 from firebase_admin import auth
 import datetime as dt
 from datetime import datetime, date, timedelta
+import datetime
+import re
 from decimal import Decimal
 from typing import Optional, Union, Dict, Iterable
 from collections import defaultdict
@@ -12,56 +14,29 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 
 
-def _safe_str(v) -> Optional[str]:
-    if v is None:
-        return None
-    if isinstance(v, str):
-        s = v.strip()
-        return s if s else None
-    if isinstance(v, (int, float, Decimal)):
-        return str(v)
-    if isinstance(v, (bytes, bytearray)):
-        for enc in ("utf-8", "latin-1", "cp1252"):
-            try:
-                s = v.decode(enc, errors="ignore").strip()
-                return s if s else None
-            except Exception:
-                continue
-        return None
-    s = str(v).strip()
-    return s if s else None
+# Funciones auxiliares de normalización
+def s(x):
+    return "" if x is None else str(x)
 
 
-def _oa_date_to_date(v: Union[float, Decimal]) -> Optional[date]:
-    try:
-        base = datetime(1899, 12, 30)
-        return (base + timedelta(days=int(float(v)))).date()
-    except Exception:
-        return None
+def s_trim(x):
+    return s(x).strip()
 
 
-def _parse_date_any(v) -> Optional[date]:
-    if v is None:
+def safe_re_sub(pattern, repl, value):
+    return re.sub(pattern, repl, s(value))
+
+
+def to_date(x):
+    if x is None or x == "":
         return None
-    if isinstance(v, date) and not isinstance(v, datetime):
-        return v
-    if isinstance(v, datetime):
-        return v.date()
-    if isinstance(v, (float, Decimal)):
-        d = _oa_date_to_date(v)
-        if d:
-            return d
-    s = _safe_str(v)
-    if not s:
-        return None
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y"):
+    if isinstance(x, datetime.datetime):
+        return x.date()
+    if isinstance(x, datetime.date):
+        return x
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y"):
         try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            pass
-    if s.isdigit() and len(s) == 8:
-        try:
-            return datetime.strptime(s, "%Y%m%d").date()
+            return datetime.datetime.strptime(s(x), fmt).date()
         except ValueError:
             pass
     return None
@@ -104,20 +79,21 @@ def cargar_trabajadores(dnis: Iterable[str]) -> Dict[str, Dict[str, Optional[str
             query = f"SELECT {columnas} FROM TRABAJADORES WHERE DNI IN ({placeholders})"
             cursor.execute(query, bloque)
             for row in cursor.fetchall():
-                dni = _safe_str(getattr(row, 'DNI', None))
+                dni = safe_re_sub(r"\D", "", getattr(row, 'DNI', None))
+                dni = s_trim(dni)
                 if not dni:
                     continue
-                alta_dt = _parse_date_any(getattr(row, 'FECHAALTA', None))
-                baja_dt = _parse_date_any(getattr(row, 'FECHABAJA', None))
-                ap1 = _safe_str(getattr(row, 'APELLIDOS', None)) or ''
-                ap2 = _safe_str(getattr(row, 'APELLIDOS2', None)) or ''
-                nom = _safe_str(getattr(row, 'NOMBRE', None)) or ''
+                alta_dt = to_date(getattr(row, 'FECHAALTA', None))
+                baja_dt = to_date(getattr(row, 'FECHABAJA', None))
+                ap1 = s_trim(getattr(row, 'APELLIDOS', None))
+                ap2 = s_trim(getattr(row, 'APELLIDOS2', None))
+                nom = s_trim(getattr(row, 'NOMBRE', None))
                 nombre_compuesto = ' '.join([t for t in (ap1, ap2, nom) if t]).strip() or 'Falta'
                 resultado[dni] = {
                     'Nombre': nombre_compuesto,
                     'Alta': _date_to_str_ddmmyyyy(alta_dt),
                     'Baja': _date_to_str_ddmmyyyy(baja_dt),
-                    'Codigo': _safe_str(getattr(row, 'CODIGO', None))
+                    'Codigo': s_trim(getattr(row, 'CODIGO', None))
                 }
         cursor.close()
         conn.close()
@@ -154,12 +130,13 @@ def cargar_datos_ajustados(dnis: Iterable[str], min_alta: date) -> Dict[str, Dic
             )
             cursor.execute(query, params)
             for row in cursor.fetchall():
-                dni = _safe_str(getattr(row, 'DNI', None))
+                dni = safe_re_sub(r"\D", "", getattr(row, 'DNI', None))
+                dni = s_trim(dni)
                 if not dni:
                     continue
-                fecha = _parse_date_any(getattr(row, 'FECHA', None))
-                horas = float(getattr(row, 'HORAS', 0) or 0) + float(getattr(row, 'HORASEXT', 0) or 0)
-                categoria = _safe_str(getattr(row, 'CATEGORIA', None))
+                fecha = to_date(getattr(row, 'FECHA', None))
+                horas = float(s(getattr(row, 'HORAS', 0)) or 0) + float(s(getattr(row, 'HORASEXT', 0)) or 0)
+                categoria = s_trim(getattr(row, 'CATEGORIA', None))
                 info = datos[dni]
                 if fecha:
                     info['_fechas'].add(fecha)
@@ -311,7 +288,7 @@ def abrir_gestion_usuarios(db):
             elif campo in ["TotalHoras"]:
                 valor = float(valor)
             elif campo in ["Alta", "UltimoDia", "Baja", "Codigo"]:
-                valor = _safe_str(valor)
+                valor = s_trim(valor)
             doc_ref.update({campo: valor})
         except Exception as e:
             print(f"⚠️ Error al guardar {campo} de {uid}: {e}")
@@ -360,10 +337,10 @@ def abrir_gestion_usuarios(db):
         min_alta = hoy - timedelta(days=365)
         for doc in usuarios_docs:
             data = doc.to_dict()
-            dni = _safe_str(data.get("Dni"))
+            dni = s_trim(data.get("Dni"))
             if dni:
                 dnis.add(dni)
-                alta = _parse_date_any(data.get("Alta"))
+                alta = to_date(data.get("Alta"))
                 if alta and alta < min_alta:
                     min_alta = alta
 
@@ -378,7 +355,7 @@ def abrir_gestion_usuarios(db):
             uid = doc.id
             data = doc.to_dict()
             actualiza = {}
-            dni = _safe_str(data.get("Dni")) or "Falta"
+            dni = s_trim(data.get("Dni")) or "Falta"
             data["Dni"] = dni
 
             if dni != "Falta":
@@ -438,7 +415,7 @@ def abrir_gestion_usuarios(db):
             data["TotalDia"] = str(data.get("TotalDia", "0"))
             data["TotalHoras"] = str(data.get("TotalHoras", "0.0"))
             data["Baja"] = data.get("Baja")
-            data["Codigo"] = _safe_str(data.get("Codigo")) or ""
+            data["Codigo"] = s_trim(data.get("Codigo")) or ""
 
             fila = {"UID": uid, **{col: data.get(col, "") for col in columnas}}
             return uid, fila, actualiza
@@ -525,7 +502,7 @@ def abrir_gestion_usuarios(db):
                     datos[campo] = 0.0
 
             for campo in ["Alta", "UltimoDia", "Baja", "Codigo"]:
-                datos[campo] = _safe_str(datos.get(campo))
+                datos[campo] = s_trim(datos.get(campo))
 
             try:
                 db.collection("UsuariosAutorizados").document(uid).update(datos)
