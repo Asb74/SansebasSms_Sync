@@ -74,7 +74,7 @@ def obtener_token_oauth():
     try:
         creds = service_account.Credentials.from_service_account_file(
             credenciales_dinamicas["ruta"],
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            scopes=["https://www.googleapis.com/auth/firebase.messaging"]
         )
         creds.refresh(Request())
         return creds.token
