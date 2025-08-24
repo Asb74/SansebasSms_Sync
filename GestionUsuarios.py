@@ -67,12 +67,12 @@ def cargar_trabajadores(dnis: Iterable[str]) -> Dict[str, Dict[str, Optional[str
         return resultado
 
     conn_str = (
-        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};',
-        f'DBQ={ruta};',
+        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};'
+        f'DBQ={ruta};'
     )
     columnas = "DNI, CODIGO, FECHAALTA, FECHABAJA, APELLIDOS, APELLIDOS2, NOMBRE"
     try:
-        conn = pyodbc.connect(conn_str)
+        conn = pyodbc.connect(str(conn_str))
         cursor = conn.cursor()
         for bloque in _chunk_iterable(list(dnis), 1000):
             placeholders = ','.join('?' for _ in bloque)
@@ -115,11 +115,11 @@ def cargar_datos_ajustados(dnis: Iterable[str], min_alta: date) -> Dict[str, Dic
         return datos
 
     conn_str = (
-        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};',
-        f'DBQ={ruta};',
+        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};'
+        f'DBQ={ruta};'
     )
     try:
-        conn = pyodbc.connect(conn_str)
+        conn = pyodbc.connect(str(conn_str))
         cursor = conn.cursor()
         for bloque in _chunk_iterable(list(dnis), 1000):
             placeholders = ','.join('?' for _ in bloque)
