@@ -26,6 +26,9 @@ def s_trim(x):
 def safe_re_sub(pattern, repl, value):
     return re.sub(pattern, repl, s(value))
 
+def normalizar_dni(dni):
+    return safe_re_sub(r"[^0-9A-Za-z]", "", dni).upper()
+
 
 def to_date(x):
     if x is None or x == "":
@@ -79,8 +82,7 @@ def cargar_trabajadores(dnis: Iterable[str]) -> Dict[str, Dict[str, Optional[str
             query = f"SELECT {columnas} FROM TRABAJADORES WHERE DNI IN ({placeholders})"
             cursor.execute(query, bloque)
             for row in cursor.fetchall():
-                dni = safe_re_sub(r"\D", "", getattr(row, 'DNI', None))
-                dni = s_trim(dni)
+                dni = normalizar_dni(getattr(row, 'DNI', None))
                 if not dni:
                     continue
                 alta_dt = to_date(getattr(row, 'FECHAALTA', None))
@@ -130,8 +132,7 @@ def cargar_datos_ajustados(dnis: Iterable[str], min_alta: date) -> Dict[str, Dic
             )
             cursor.execute(query, params)
             for row in cursor.fetchall():
-                dni = safe_re_sub(r"\D", "", getattr(row, 'DNI', None))
-                dni = s_trim(dni)
+                dni = normalizar_dni(getattr(row, 'DNI', None))
                 if not dni:
                     continue
                 fecha = to_date(getattr(row, 'FECHA', None))
@@ -337,8 +338,7 @@ def abrir_gestion_usuarios(db):
         min_alta = hoy - timedelta(days=365)
         for doc in usuarios_docs:
             data = doc.to_dict()
-            dni = safe_re_sub(r"\D", "", data.get("Dni"))
-            dni = s_trim(dni)
+            dni = normalizar_dni(data.get("Dni"))
             if dni:
                 dnis.add(dni)
                 alta = to_date(data.get("Alta"))
@@ -356,8 +356,7 @@ def abrir_gestion_usuarios(db):
             uid = doc.id
             data = doc.to_dict()
             actualiza = {}
-            dni = safe_re_sub(r"\D", "", data.get("Dni"))
-            dni = s_trim(dni) or "Falta"
+            dni = normalizar_dni(data.get("Dni")) or "Falta"
             data["Dni"] = dni
 
             if dni != "Falta":
