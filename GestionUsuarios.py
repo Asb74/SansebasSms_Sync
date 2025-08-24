@@ -337,7 +337,8 @@ def abrir_gestion_usuarios(db):
         min_alta = hoy - timedelta(days=365)
         for doc in usuarios_docs:
             data = doc.to_dict()
-            dni = s_trim(data.get("Dni"))
+            dni = safe_re_sub(r"\D", "", data.get("Dni"))
+            dni = s_trim(dni)
             if dni:
                 dnis.add(dni)
                 alta = to_date(data.get("Alta"))
@@ -355,7 +356,8 @@ def abrir_gestion_usuarios(db):
             uid = doc.id
             data = doc.to_dict()
             actualiza = {}
-            dni = s_trim(data.get("Dni")) or "Falta"
+            dni = safe_re_sub(r"\D", "", data.get("Dni"))
+            dni = s_trim(dni) or "Falta"
             data["Dni"] = dni
 
             if dni != "Falta":
