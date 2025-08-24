@@ -79,18 +79,29 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
     combo_mensajes['values'] = ["(Todos)"]
     combo_mensajes.current(0)
 
+    tk.Label(frame_top, text="Nombre:").pack(side="left", padx=(20, 5))
+    entry_nombre = tk.Entry(frame_top)
+    entry_nombre.pack(side="left")
+
+    tk.Label(frame_top, text="Estado:").pack(side="left", padx=(20, 5))
+    combo_estado = ttk.Combobox(frame_top, state="readonly")
+    combo_estado.pack(side="left")
+    combo_estado['values'] = ["(Todos)"]
+    combo_estado.current(0)
+
     btn_limpiar = tk.Button(frame_top, text="Limpiar", command=lambda: limpiar())
     btn_limpiar.pack(side="left", padx=5)
 
     frame_tree = tk.Frame(ventana)
     frame_tree.pack(fill="both", expand=True)
 
-    columnas = ["Fecha/Hora", "Mensaje", "Teléfono", "Nombre", "Estado"]
+    columnas = ["Fecha/Hora", "Mensaje", "Motivo", "Teléfono", "Nombre", "Estado"]
     tree = ttk.Treeview(frame_tree, columns=columnas, show="headings")
     for col in columnas:
         tree.heading(col, text=col)
     tree.column("Fecha/Hora", width=130, anchor="w")
     tree.column("Mensaje", width=250, anchor="w")
+    tree.column("Motivo", width=120, anchor="w")
     tree.column("Teléfono", width=100, anchor="w")
     tree.column("Nombre", width=150, anchor="w")
     tree.column("Estado", width=80, anchor="w")
@@ -123,16 +134,23 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
             messagebox.showerror("Error", "Fecha inválida. Use DD-MM-YYYY.")
             return None
 
-    def aplicar_filtro_mensaje(valor: str):
+    def aplicar_filtros():
         tree.delete(*tree.get_children())
-        if valor == "(Todos)":
-            filtrados = datos_tabla
-        else:
-            filtrados = [d for d in datos_tabla if d.get("Mensaje") == valor]
+        filtro_mensaje = combo_mensajes.get()
+        filtro_estado = combo_estado.get()
+        filtro_nombre = entry_nombre.get().strip().lower()
+        filtrados = datos_tabla
+        if filtro_mensaje != "(Todos)":
+            filtrados = [d for d in filtrados if d.get("Mensaje") == filtro_mensaje]
+        if filtro_estado != "(Todos)":
+            filtrados = [d for d in filtrados if d.get("Estado", "") == filtro_estado]
+        if filtro_nombre:
+            filtrados = [d for d in filtrados if filtro_nombre in d.get("Nombre", "").lower()]
         for d in filtrados:
             tree.insert("", "end", values=(
                 formatea_fecha(d.get("Fecha/Hora")),
                 d.get("Mensaje", ""),
+                d.get("Motivo", ""),
                 d.get("Teléfono", ""),
                 d.get("Nombre", ""),
                 d.get("Estado", ""),
@@ -149,6 +167,7 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
             docs = db.collection("Mensajes").where("fechaHora", ">=", inicio).where("fechaHora", "<", fin).stream()
             datos = []
             mensajes_unicos = set()
+            estados_unicos = set()
             for doc in docs:
                 item = doc.to_dict()
                 fecha = item.get("fechaHora")
@@ -156,21 +175,33 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
                 telefono = item.get("telefono", "")
                 uid = item.get("uid")
                 estado_msg = item.get("estado", "")
+                motivo = item.get("motivo")
+                if not motivo:
+                    motivo = estado_msg or ""
                 nombre = fetch_nombre(uid, db)
                 datos.append({
                     "Fecha/Hora": fecha,
                     "Mensaje": mensaje,
+                    "Motivo": motivo,
                     "Teléfono": telefono,
                     "Nombre": nombre,
                     "Estado": estado_msg,
                 })
                 mensajes_unicos.add(mensaje or "")
+                estados_unicos.add(estado_msg or "")
             datos.sort(key=lambda x: x.get("Fecha/Hora"), reverse=True)
             datos_tabla = datos
-            valores_combo = ["(Todos)"] + sorted([m for m in mensajes_unicos if m])
-            combo_mensajes['values'] = valores_combo if valores_combo else ["(Todos)"]
-            combo_mensajes.current(0)
-            aplicar_filtro_mensaje("(Todos)")
+
+            sel_mensaje = combo_mensajes.get()
+            sel_estado = combo_estado.get()
+            valores_msj = ["(Todos)"] + sorted([m for m in mensajes_unicos if m])
+            valores_est = ["(Todos)"] + sorted([e for e in estados_unicos if e])
+            combo_mensajes['values'] = valores_msj
+            combo_estado['values'] = valores_est
+            combo_mensajes.set(sel_mensaje if sel_mensaje in valores_msj else "(Todos)")
+            combo_estado.set(sel_estado if sel_estado in valores_est else "(Todos)")
+
+            aplicar_filtros()
             ms = int((time.perf_counter() - t0) * 1000)
             estado_var.set(f"{len(datos_tabla)} resultados · {d.strftime('%d-%m-%Y')} · {ms} ms")
             print(f"⏱️ cargar_mensajes: {ms} ms ({len(datos_tabla)} registros)")
@@ -178,10 +209,8 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
             messagebox.showerror("Error", f"No se pudieron cargar los mensajes: {e}")
             print(f"❌ Error cargando mensajes: {e}")
 
-    def on_combo_change(event):
-        aplicar_filtro_mensaje(combo_mensajes.get())
-
-    combo_mensajes.bind("<<ComboboxSelected>>", on_combo_change)
+    combo_mensajes.bind("<<ComboboxSelected>>", lambda e: aplicar_filtros())
+    combo_estado.bind("<<ComboboxSelected>>", lambda e: aplicar_filtros())
 
     def exportar_csv():
         filas = [tree.item(i, "values") for i in tree.get_children()]
@@ -208,6 +237,9 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
             selector_fecha.insert(0, date.today().strftime("%d-%m-%Y"))
         combo_mensajes['values'] = ["(Todos)"]
         combo_mensajes.current(0)
+        combo_estado['values'] = ["(Todos)"]
+        combo_estado.current(0)
+        entry_nombre.delete(0, tk.END)
         cargar_mensajes()
 
     cargar_mensajes()
