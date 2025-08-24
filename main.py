@@ -337,7 +337,8 @@ ventana.geometry("500x580")
 ventana.resizable(False, False)
 
 try:
-    ventana.iconphoto(False, tk.PhotoImage(file="icono_app.png"))
+    # Establecer el icono como predeterminado para todas las ventanas
+    ventana.iconphoto(True, tk.PhotoImage(file="icono_app.png"))
 except:
     pass
 
