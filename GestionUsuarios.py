@@ -14,6 +14,9 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 
 
+# Ventana principal de gestión de usuarios (singleton)
+ventana_usuarios = None
+
 # Funciones auxiliares de normalización
 def s(x):
     return "" if x is None else str(x)
@@ -162,9 +165,24 @@ def cargar_datos_ajustados(dnis: Iterable[str], min_alta: date) -> Dict[str, Dic
     return final
 
 def abrir_gestion_usuarios(db):
-    ventana = tk.Toplevel()
+    """Abre la ventana de gestión de usuarios evitando duplicados."""
+    global ventana_usuarios
+    if ventana_usuarios and ventana_usuarios.winfo_exists():
+        ventana_usuarios.lift()
+        ventana_usuarios.focus_force()
+        return
+
+    ventana_usuarios = tk.Toplevel()
+    ventana = ventana_usuarios
     ventana.title("👥 Gestión de Usuarios")
     ventana.geometry("1400x600")
+
+    def on_close():
+        global ventana_usuarios
+        ventana_usuarios = None
+        ventana.destroy()
+
+    ventana.protocol("WM_DELETE_WINDOW", on_close)
 
     columnas = ["Dni", "Nombre", "Telefono", "correo", "Puesto", "Turno", "Cultivo",
                 "Mensaje", "Seleccionable", "Valor", "Alta", "UltimoDia", "TotalDia", "TotalHoras", "Baja", "Codigo"]
