@@ -15,6 +15,9 @@ from firebase_admin import firestore
 
 nombre_cache: Dict[str, str] = {}
 
+# Ventana principal de gestión de mensajes (singleton)
+ventana_mensajes = None
+
 
 def sanitize_filename(s: str) -> str:
     return re.sub(r'[\\/*?:"<>|]+', " ", s).strip()
@@ -56,9 +59,24 @@ def fetch_nombre(uid: str, db: firestore.Client) -> str:
 
 
 def abrir_gestion_mensajes(db: firestore.Client) -> None:
-    ventana = tk.Toplevel()
+    """Abre la ventana de gestión de mensajes evitando duplicados."""
+    global ventana_mensajes
+    if ventana_mensajes and ventana_mensajes.winfo_exists():
+        ventana_mensajes.lift()
+        ventana_mensajes.focus_force()
+        return
+
+    ventana_mensajes = tk.Toplevel()
+    ventana = ventana_mensajes
     ventana.title("Gestión de Mensajes")
     ventana.geometry("900x500")
+
+    def on_close():
+        global ventana_mensajes
+        ventana_mensajes = None
+        ventana.destroy()
+
+    ventana.protocol("WM_DELETE_WINDOW", on_close)
 
     datos_tabla = []
 
