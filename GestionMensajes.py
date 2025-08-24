@@ -4,6 +4,7 @@ import csv
 from datetime import datetime, date, timedelta
 import time
 from typing import Dict, Tuple
+import re
 
 try:
     from tkcalendar import DateEntry
@@ -13,6 +14,10 @@ except Exception:  # tkcalendar no disponible
 from firebase_admin import firestore
 
 nombre_cache: Dict[str, str] = {}
+
+
+def sanitize_filename(s: str) -> str:
+    return re.sub(r'[\\/*?:"<>|]+', " ", s).strip()
 
 
 def start_end_of_day(d: date) -> Tuple[datetime, datetime]:
@@ -217,14 +222,47 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
         if not filas:
             messagebox.showinfo("Sin datos", "No hay datos para exportar.")
             return
-        filename = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
-        if not filename:
+
+        fecha_seleccionada = obtener_fecha()
+        if not fecha_seleccionada:
             return
+        date_str = fecha_seleccionada.strftime("%Y%m%d")
+        time_str = datetime.now().strftime("%H%M")
+        sel = combo_mensajes.get()
+        base = "Mensajes" if not sel or sel == "(Todos)" else sanitize_filename(sel)[:60]
+        default_name = f"{date_str}_{time_str} {base}.csv"
+        path = filedialog.asksaveasfilename(
+            initialfile=default_name,
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv")],
+        )
+        if not path:
+            return
+
+        filas_visibles = [
+            {
+                "fecha_hora": f[0],
+                "mensaje": f[1],
+                "motivo": f[2],
+                "telefono": f[3],
+                "nombre": f[4],
+                "estado": f[5],
+            }
+            for f in filas
+        ]
         try:
-            with open(filename, "w", newline='', encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(columnas)
-                writer.writerows(filas)
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f, delimiter=";", quoting=csv.QUOTE_MINIMAL)
+                writer.writerow(["Fecha/Hora", "Mensaje", "Motivo", "Teléfono", "Nombre", "Estado"])
+                for item in filas_visibles:
+                    writer.writerow([
+                        item["fecha_hora"],
+                        item["mensaje"],
+                        item["motivo"],
+                        item["telefono"],
+                        item["nombre"],
+                        item["estado"],
+                    ])
             messagebox.showinfo("Éxito", "CSV exportado correctamente.")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo exportar CSV: {e}")
