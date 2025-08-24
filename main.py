@@ -12,6 +12,7 @@ from PIL import Image, ImageTk
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 from GestionUsuarios import abrir_gestion_usuarios
+from GestionMensajes import abrir_gestion_mensajes
 import re
 from decimal import Decimal
 from typing import Optional
@@ -358,6 +359,7 @@ tk.Button(frame, text="📨 Revisar mensajes pendientes", command=revisar_mensaj
 tk.Button(frame, text="📝 Crear mensajes automáticos", command=crear_mensajes_para_todos, height=2, width=40, bg="lightblue").pack(pady=5)
 tk.Button(frame, text="📲 Enviar notificaciones push", command=enviar_notificaciones_push, height=2, width=40, bg="lightgreen").pack(pady=5)
 tk.Button(frame, text="👥 Gestionar Usuarios", command=lambda: abrir_gestion_usuarios(db), height=2, width=40, bg="lightyellow").pack(pady=5)
+tk.Button(frame, text="📜 Gestionar Mensajes", command=lambda: abrir_gestion_mensajes(db), height=2, width=40).pack(pady=5)
 
 
 eliminar_var = tk.BooleanVar(value=True)
