@@ -261,6 +261,14 @@ def abrir_gestion_usuarios(db):
         tabla.heading(col, text=texto_col, command=lambda c=col: ordenar_columna(c))
         tabla.column(col, anchor="center", width=110)
 
+    seleccionar_todos_var = tk.BooleanVar(value=False)
+
+    def toggle_seleccionar_todos():
+        if seleccionar_todos_var.get():
+            tabla.selection_set(tabla.get_children())
+        else:
+            tabla.selection_remove(tabla.get_children())
+
     def aplicar_filtros():
         tabla.delete(*tabla.get_children())
         criterios = {col: entradas_filtro[col].get().strip().lower() for col in columnas}
@@ -273,6 +281,7 @@ def abrir_gestion_usuarios(db):
                     break
             if visible:
                 tabla.insert("", "end", iid=row["UID"], values=[row.get(c, "") for c in columnas])
+        toggle_seleccionar_todos()
 
     def limpiar_filtros():
         for entry in entradas_filtro.values():
@@ -528,6 +537,7 @@ def abrir_gestion_usuarios(db):
 
     tk.Button(frame_botones, text="🔍 Filtrar", command=aplicar_filtros).pack(side="left", padx=10)
     tk.Button(frame_botones, text="🧹 Limpiar", command=limpiar_filtros).pack(side="left", padx=10)
+    tk.Checkbutton(frame_botones, text="Seleccionar Todos", variable=seleccionar_todos_var, command=toggle_seleccionar_todos).pack(side="left", padx=10)
     tk.Button(frame_botones, text="Mensaje", command=toggle_mensaje).pack(side="left", padx=10)
     tk.Button(frame_botones, text="🗑 Eliminar seleccionado", bg="salmon", command=eliminar_usuario).pack(side="left", padx=10)
     tk.Button(frame_botones, text="💾 Guardar todo", bg="lightgreen", command=guardar_todo).pack(side="left", padx=10)
