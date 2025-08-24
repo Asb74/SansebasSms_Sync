@@ -213,7 +213,7 @@ def abrir_gestion_usuarios(db):
     tabla_canvas_frame = tk.Frame(canvas)
     canvas.create_window((0, 0), window=tabla_canvas_frame, anchor="nw")
 
-    tabla = ttk.Treeview(tabla_canvas_frame, columns=columnas, show="headings", selectmode="browse")
+    tabla = ttk.Treeview(tabla_canvas_frame, columns=columnas, show="headings", selectmode="extended")
     tabla.grid(row=0, column=0, sticky="nsew")
     orden_actual = {col: None for col in columnas}
 
@@ -449,6 +449,20 @@ def abrir_gestion_usuarios(db):
             f"t4→t5 commit {t5 - t4:.2f}s | total {t5 - t0:.2f}s"
         )
 
+    def toggle_mensaje():
+        seleccion = tabla.selection()
+        if not seleccion:
+            messagebox.showwarning("⚠️ Selección", "Selecciona uno o más usuarios.")
+            return
+        for uid in seleccion:
+            valor_actual = tabla.set(uid, "Mensaje")
+            nuevo_valor = "False" if valor_actual == "True" else "True"
+            tabla.set(uid, "Mensaje", nuevo_valor)
+            guardar_dato(uid, "Mensaje", nuevo_valor)
+            for fila in datos_originales:
+                if fila["UID"] == uid:
+                    fila["Mensaje"] = nuevo_valor
+                    break
 
     def eliminar_usuario():
         seleccion = tabla.focus()
@@ -514,6 +528,7 @@ def abrir_gestion_usuarios(db):
 
     tk.Button(frame_botones, text="🔍 Filtrar", command=aplicar_filtros).pack(side="left", padx=10)
     tk.Button(frame_botones, text="🧹 Limpiar", command=limpiar_filtros).pack(side="left", padx=10)
+    tk.Button(frame_botones, text="Mensaje", command=toggle_mensaje).pack(side="left", padx=10)
     tk.Button(frame_botones, text="🗑 Eliminar seleccionado", bg="salmon", command=eliminar_usuario).pack(side="left", padx=10)
     tk.Button(frame_botones, text="💾 Guardar todo", bg="lightgreen", command=guardar_todo).pack(side="left", padx=10)
 
