@@ -60,6 +60,23 @@ archivo_notificados = "notificados.json"
 
 # Inicializar Firebase
 try:
+    if not os.path.exists(credenciales_dinamicas["ruta"]):
+        root = tk.Tk()
+        root.withdraw()
+        nueva_ruta = filedialog.askopenfilename(
+            title="Selecciona archivo de credenciales",
+            filetypes=[("Archivos JSON", "*.json")]
+        )
+        if not nueva_ruta:
+            messagebox.showinfo(
+                "Credenciales",
+                "No se seleccionó archivo de credenciales. La aplicación se cerrará."
+            )
+            root.destroy()
+            exit()
+        credenciales_dinamicas["ruta"] = nueva_ruta
+        root.destroy()
+
     with open(credenciales_dinamicas["ruta"], "r") as f:
         data = json.load(f)
         project_info["id"] = data.get("project_id")
