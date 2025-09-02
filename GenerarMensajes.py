@@ -4,13 +4,13 @@ from datetime import datetime
 
 try:
     from tkcalendar import DateEntry
-except Exception:  # Si tkcalendar no está disponible
+except Exception:  # pragma: no cover - tkcalendar opcional
     DateEntry = None  # type: ignore
 
 ventana_generar = None
 
-
 def abrir_generar_mensajes(db):
+    """Abre la ventana para generar mensajes masivos."""
     global ventana_generar
     if ventana_generar and ventana_generar.winfo_exists():
         ventana_generar.lift()
@@ -18,85 +18,98 @@ def abrir_generar_mensajes(db):
         return
 
     ventana_generar = tk.Toplevel()
-    ventana_generar.title("Generar Mensaje")
-    ventana_generar.geometry("360x400")
+    ventana_generar.title("Generar Mensajes")
     ventana_generar.resizable(False, False)
 
     frm = ttk.Frame(ventana_generar, padding=10)
     frm.grid(sticky="nsew")
     frm.columnconfigure(1, weight=1)
+    pad = {"padx": 10, "pady": 6}
 
-    ttk.Label(frm, text="Tipo:").grid(row=0, column=0, sticky="w", pady=5)
+    # --- Tipo ---
+    ttk.Label(frm, text="Tipo:").grid(row=0, column=0, sticky="w", **pad)
     cmb_tipo = ttk.Combobox(frm, state="readonly")
-    cmb_tipo.grid(row=0, column=1, sticky="ew", pady=5)
+    cmb_tipo.grid(row=0, column=1, sticky="ew", **pad)
 
-    ttk.Label(frm, text="Día:").grid(row=1, column=0, sticky="w", pady=5)
+    # --- Día ---
+    ttk.Label(frm, text="Día:").grid(row=1, column=0, sticky="w", **pad)
     if DateEntry:
-        dt_dia = DateEntry(frm, date_pattern="yyyy-mm-dd")
+        date_entry = DateEntry(frm, date_pattern="yyyy-mm-dd")
     else:
-        dt_dia = ttk.Entry(frm)
-        dt_dia.insert(0, datetime.now().strftime("%Y-%m-%d"))
-    dt_dia.grid(row=1, column=1, sticky="ew", pady=5)
+        date_entry = ttk.Entry(frm)
+        date_entry.insert(0, datetime.now().strftime("%Y-%m-%d"))
+    date_entry.grid(row=1, column=1, sticky="ew", **pad)
 
-    ttk.Label(frm, text="Hora:").grid(row=2, column=0, sticky="w", pady=5)
-    sp_hora = tk.Spinbox(frm, from_=0, to=23, width=5, format="%02.0f")
-    sp_hora.delete(0, tk.END)
-    sp_hora.insert(0, datetime.now().strftime("%H"))
-    sp_hora.grid(row=2, column=1, sticky="w", pady=5)
-    sp_minuto = tk.Spinbox(frm, from_=0, to=59, width=5, format="%02.0f")
-    sp_minuto.delete(0, tk.END)
-    sp_minuto.insert(0, datetime.now().strftime("%M"))
-    sp_minuto.grid(row=2, column=1, sticky="e", pady=5)
+    # --- Hora ---
+    ttk.Label(frm, text="Hora:").grid(row=2, column=0, sticky="w", **pad)
+    frm_time = ttk.Frame(frm)
+    frm_time.grid(row=2, column=1, sticky="w", **pad)
+    hora_var = tk.StringVar(value="07")
+    min_var = tk.StringVar(value="00")
+    sp_hora = tk.Spinbox(frm_time, from_=0, to=23, width=3, textvariable=hora_var,
+                         state="readonly", wrap=True, format="%02.0f")
+    sp_hora.pack(side="left")
+    ttk.Label(frm_time, text=":").pack(side="left")
+    sp_min = tk.Spinbox(frm_time, from_=0, to=59, width=3, textvariable=min_var,
+                        state="readonly", wrap=True, format="%02.0f")
+    sp_min.pack(side="left")
 
-    ttk.Label(frm, text="Mensaje:").grid(row=3, column=0, sticky="w", pady=5)
+    # --- Mensaje ---
+    ttk.Label(frm, text="Mensaje:").grid(row=3, column=0, sticky="w", **pad)
     cmb_mensaje = ttk.Combobox(frm, state="readonly")
-    cmb_mensaje.grid(row=3, column=1, sticky="ew", pady=5)
+    cmb_mensaje.grid(row=3, column=1, sticky="ew", **pad)
 
-    ttk.Label(frm, text="Cuerpo:").grid(row=4, column=0, sticky="nw", pady=5)
-    txt_cuerpo = tk.Text(frm, height=5, width=30)
-    txt_cuerpo.grid(row=4, column=1, sticky="ew", pady=5)
+    # --- Cuerpo ---
+    ttk.Label(frm, text="Cuerpo:").grid(row=4, column=0, sticky="nw", **pad)
+    txt_cuerpo = tk.Text(frm, width=40, height=5)
+    txt_cuerpo.grid(row=4, column=1, sticky="ew", **pad)
     lbl_contador = ttk.Label(frm, text="0/200")
-    lbl_contador.grid(row=5, column=1, sticky="e")
+    lbl_contador.grid(row=5, column=1, sticky="e", **pad)
 
-    def on_key(event=None):
-        contenido = txt_cuerpo.get("1.0", "end-1c")
-        if len(contenido) > 200:
+    def limitar_cuerpo(event=None):
+        texto = txt_cuerpo.get("1.0", "end-1c")
+        if len(texto) > 200:
             txt_cuerpo.delete("1.0", tk.END)
-            txt_cuerpo.insert("1.0", contenido[:200])
-            contenido = contenido[:200]
-        lbl_contador.config(text=f"{len(contenido)}/200")
-    txt_cuerpo.bind("<KeyRelease>", on_key)
+            txt_cuerpo.insert("1.0", texto[:200])
+            texto = texto[:200]
+        lbl_contador.config(text=f"{len(texto)}/200")
 
+    txt_cuerpo.bind("<KeyRelease>", limitar_cuerpo)
+
+    # --- Botón guardar ---
     btn_guardar = ttk.Button(frm, text="Guardar")
     btn_guardar.grid(row=6, column=0, columnspan=2, pady=10)
 
+    # --- Carga de datos Firestore ---
     def cargar_tipos():
         try:
             doc = db.collection("PlantillasTipoMensaje").document("TipoMensaje").get()
             if doc.exists:
-                tipos = [x.strip() for x in doc.to_dict().get("Tipo", "").split(",") if x.strip()]
+                tipos = [s.strip() for s in doc.to_dict().get("Tipo", "").split(",") if s.strip()]
                 cmb_tipo["values"] = tipos
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los tipos: {e}")
-            print(f"❌ Error cargando tipos: {e}")
 
-    def cargar_mensajes_por_tipo(event=None):
+    def cargar_mensajes(event=None):
         tipo = cmb_tipo.get().strip()
+        if not tipo:
+            cmb_mensaje["values"] = []
+            cmb_mensaje.set("")
+            return
         try:
             doc = db.collection("PlantillasMensaje").document(tipo).get()
+            mensajes = []
             if doc.exists:
-                mensajes = [x.strip() for x in doc.to_dict().get("Mensaje", "").split(",") if x.strip()]
-            else:
-                mensajes = []
+                mensajes = [s.strip() for s in doc.to_dict().get("Mensaje", "").split(",") if s.strip()]
             cmb_mensaje["values"] = mensajes
             cmb_mensaje.set(mensajes[0] if mensajes else "")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los mensajes: {e}")
-            print(f"❌ Error cargando mensajes del tipo {tipo}: {e}")
 
-    cmb_tipo.bind("<<ComboboxSelected>>", cargar_mensajes_por_tipo)
+    cmb_tipo.bind("<<ComboboxSelected>>", cargar_mensajes)
 
-    def guardar_mensaje():
+    # --- Guardar ---
+    def guardar():
         tipo = cmb_tipo.get().strip()
         mensaje = cmb_mensaje.get().strip()
         cuerpo = txt_cuerpo.get("1.0", "end-1c").strip()
@@ -107,50 +120,63 @@ def abrir_generar_mensajes(db):
             messagebox.showerror("Error", "El cuerpo supera 200 caracteres")
             return
 
-        if DateEntry:
-            dia = dt_dia.get_date().strftime("%Y-%m-%d")
-        else:
-            dia = dt_dia.get().strip()
         try:
-            dia_date = datetime.strptime(dia, "%Y-%m-%d").date()
+            if DateEntry and isinstance(date_entry, DateEntry):
+                dia = date_entry.get_date()
+            else:
+                dia = datetime.strptime(date_entry.get().strip(), "%Y-%m-%d").date()
         except Exception:
             messagebox.showerror("Error", "Fecha inválida")
             return
         try:
             h = int(sp_hora.get())
-            m = int(sp_minuto.get())
+            m = int(sp_min.get())
         except ValueError:
             messagebox.showerror("Error", "Hora inválida")
             return
-        hora = f"{h:02d}:{m:02d}"
-        fechaHora = datetime(dia_date.year, dia_date.month, dia_date.day, h, m, 0)
-        if fechaHora < datetime.now():
-            messagebox.showerror("Error", "La fecha y hora no pueden estar en el pasado")
-            return
 
-        payload = {
-            "estado": "Pendiente",
-            "tipo": tipo,
-            "dia": dia,
-            "hora": hora,
-            "mensaje": mensaje,
-            "cuerpo": cuerpo,
-            "fechaHora": fechaHora,
-        }
+        fechaHora = datetime(dia.year, dia.month, dia.day, h, m, 0)
+        dia_str = dia.strftime("%Y-%m-%d")
+        hora_str = f"{h:02d}:{m:02d}"
 
         btn_guardar.config(state="disabled")
+        ventana_generar.update_idletasks()
         try:
-            db.collection("Mensajes").document().set(payload, merge=True)
-            messagebox.showinfo("OK", "Mensaje guardado")
-            print(f"✅ Mensaje guardado con fechaHora {fechaHora}")
-            ventana_generar.destroy()
+            usuarios = db.collection("UsuariosAutorizados").where("Mensaje", "==", True).stream()
+            count = 0
+            for doc_user in usuarios:
+                data_u = doc_user.to_dict() or {}
+                uid = doc_user.id
+                telefono = data_u.get("Telefono") or data_u.get("telefono") or ""
+                base_id = f"{uid}_{fechaHora.strftime('%Y%m%d%H%M')}"
+                doc_id = base_id
+                suf = 1
+                while db.collection("Mensajes").document(doc_id).get().exists:
+                    doc_id = f"{base_id}_{suf}"
+                    suf += 1
+                payload = {
+                    "uid": uid,
+                    "telefono": telefono,
+                    "estado": "Pendiente",
+                    "motivo": "Pendiente",
+                    "tipo": tipo,
+                    "mensaje": mensaje,
+                    "cuerpo": cuerpo,
+                    "dia": dia_str,
+                    "hora": hora_str,
+                    "fechaHora": fechaHora,
+                }
+                db.collection("Mensajes").document(doc_id).set(payload, merge=True)
+                count += 1
+                ventana_generar.update_idletasks()
         except Exception as e:
-            messagebox.showerror("Error", f"No se pudo guardar el mensaje: {e}")
-            print(f"❌ Error guardando mensaje: {e}")
-        finally:
+            messagebox.showerror("Error", f"No se pudieron crear los mensajes: {e}")
             btn_guardar.config(state="normal")
+            return
 
-    btn_guardar.config(command=guardar_mensaje)
+        messagebox.showinfo("OK", f"Mensajes creados para {count} usuarios")
+        ventana_generar.destroy()
+
+    btn_guardar.config(command=guardar)
 
     cargar_tipos()
-
