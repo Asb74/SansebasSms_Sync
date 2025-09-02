@@ -379,7 +379,12 @@ except:
 tk.Button(frame, text="📁 Seleccionar carpeta de destino", command=seleccionar_carpeta_destino, height=2, width=40).pack(pady=5)
 tk.Button(frame, text="📥 Descargar todas las colecciones", command=descargar_todo, height=2, width=40).pack(pady=5)
 tk.Button(frame, text="📤 Subir archivo Excel a Firebase", command=subir_archivo, height=2, width=40).pack(pady=5)
-tk.Button(frame, text="📨 Revisar mensajes pendientes", command=revisar_mensajes, height=2, width=40).pack(pady=5)
+SHOW_REVISAR_BTN = False
+# Botón ocultado a petición: "Revisar mensajes pendientes"
+btn_revisar = tk.Button(frame, text="📨 Revisar mensajes pendientes", command=revisar_mensajes, height=2, width=40)
+btn_revisar.pack(pady=5)
+if not SHOW_REVISAR_BTN:
+    btn_revisar.pack_forget()
 
 btn_crear_auto = tk.Button(
     frame,
