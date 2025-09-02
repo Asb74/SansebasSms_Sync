@@ -19,6 +19,11 @@ from decimal import Decimal
 from typing import Optional
 from google.cloud.firestore_v1.base_query import FieldFilter
 
+try:
+    import tkcalendar  # noqa: F401
+except Exception:
+    print("⚠️ Instale tkcalendar para habilitar selectores de fecha: pip install tkcalendar")
+
 
 def _safe_str(v) -> Optional[str]:
     if v is None:

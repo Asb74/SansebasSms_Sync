@@ -118,16 +118,33 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
     frame_tree = tk.Frame(ventana)
     frame_tree.pack(fill="both", expand=True)
 
-    columnas = ["Fecha/Hora", "Mensaje", "Motivo", "Teléfono", "Nombre", "Estado"]
+    columnas = [
+        "Tipo",
+        "Día",
+        "Hora",
+        "Mensaje",
+        "Cuerpo",
+        "Fecha/Hora",
+        "UID",
+        "Teléfono",
+        "Estado",
+        "Motivo",
+        "Nombre",
+    ]
     tree = ttk.Treeview(frame_tree, columns=columnas, show="headings")
     for col in columnas:
         tree.heading(col, text=col)
+    tree.column("Tipo", width=80, anchor="w")
+    tree.column("Día", width=80, anchor="w")
+    tree.column("Hora", width=60, anchor="w")
+    tree.column("Mensaje", width=150, anchor="w")
+    tree.column("Cuerpo", width=200, anchor="w")
     tree.column("Fecha/Hora", width=130, anchor="w")
-    tree.column("Mensaje", width=250, anchor="w")
-    tree.column("Motivo", width=120, anchor="w")
+    tree.column("UID", width=120, anchor="w")
     tree.column("Teléfono", width=100, anchor="w")
-    tree.column("Nombre", width=150, anchor="w")
     tree.column("Estado", width=80, anchor="w")
+    tree.column("Motivo", width=120, anchor="w")
+    tree.column("Nombre", width=150, anchor="w")
 
     vsb = ttk.Scrollbar(frame_tree, orient="vertical", command=tree.yview)
     hsb = ttk.Scrollbar(frame_tree, orient="horizontal", command=tree.xview)
@@ -164,19 +181,24 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
         filtro_nombre = entry_nombre.get().strip().lower()
         filtrados = datos_tabla
         if filtro_mensaje != "(Todos)":
-            filtrados = [d for d in filtrados if d.get("Mensaje") == filtro_mensaje]
+            filtrados = [d for d in filtrados if d.get("mensaje") == filtro_mensaje]
         if filtro_estado != "(Todos)":
-            filtrados = [d for d in filtrados if d.get("Estado", "") == filtro_estado]
+            filtrados = [d for d in filtrados if d.get("estado", "") == filtro_estado]
         if filtro_nombre:
             filtrados = [d for d in filtrados if filtro_nombre in d.get("Nombre", "").lower()]
         for d in filtrados:
             tree.insert("", "end", values=(
-                formatea_fecha(d.get("Fecha/Hora")),
-                d.get("Mensaje", ""),
-                d.get("Motivo", ""),
-                d.get("Teléfono", ""),
+                d.get("tipo", ""),
+                d.get("dia", ""),
+                d.get("hora", ""),
+                d.get("mensaje", ""),
+                d.get("cuerpo", ""),
+                formatea_fecha(d.get("fechaHora")),
+                d.get("uid", ""),
+                d.get("telefono", ""),
+                d.get("estado", ""),
+                d.get("motivo", ""),
                 d.get("Nombre", ""),
-                d.get("Estado", ""),
             ))
 
     def cargar_mensajes():
@@ -203,16 +225,21 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
                     motivo = estado_msg or ""
                 nombre = fetch_nombre(uid, db)
                 datos.append({
-                    "Fecha/Hora": fecha,
-                    "Mensaje": mensaje,
-                    "Motivo": motivo,
-                    "Teléfono": telefono,
+                    "tipo": item.get("tipo", ""),
+                    "dia": item.get("dia", ""),
+                    "hora": item.get("hora", ""),
+                    "mensaje": mensaje,
+                    "cuerpo": item.get("cuerpo", ""),
+                    "fechaHora": fecha,
+                    "uid": uid or "",
+                    "telefono": telefono,
+                    "estado": estado_msg,
+                    "motivo": motivo,
                     "Nombre": nombre,
-                    "Estado": estado_msg,
                 })
                 mensajes_unicos.add(mensaje or "")
                 estados_unicos.add(estado_msg or "")
-            datos.sort(key=lambda x: x.get("Fecha/Hora"), reverse=True)
+            datos.sort(key=lambda x: x.get("fechaHora"), reverse=True)
             datos_tabla = datos
 
             sel_mensaje = combo_mensajes.get()
@@ -236,8 +263,18 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
     combo_estado.bind("<<ComboboxSelected>>", lambda e: aplicar_filtros())
 
     def exportar_csv():
-        filas = [tree.item(i, "values") for i in tree.get_children()]
-        if not filas:
+        filtro_mensaje = combo_mensajes.get()
+        filtro_estado = combo_estado.get()
+        filtro_nombre = entry_nombre.get().strip().lower()
+        filtrados = datos_tabla
+        if filtro_mensaje != "(Todos)":
+            filtrados = [d for d in filtrados if d.get("mensaje") == filtro_mensaje]
+        if filtro_estado != "(Todos)":
+            filtrados = [d for d in filtrados if d.get("estado", "") == filtro_estado]
+        if filtro_nombre:
+            filtrados = [d for d in filtrados if filtro_nombre in d.get("Nombre", "").lower()]
+
+        if not filtrados:
             messagebox.showinfo("Sin datos", "No hay datos para exportar.")
             return
 
@@ -257,33 +294,27 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
         if not path:
             return
 
-        filas_visibles = [
-            {
-                "fecha_hora": f[0],
-                "mensaje": f[1],
-                "motivo": f[2],
-                "telefono": f[3],
-                "nombre": f[4],
-                "estado": f[5],
-            }
-            for f in filas
-        ]
         try:
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f, delimiter=";", quoting=csv.QUOTE_MINIMAL)
-                writer.writerow(["Fecha/Hora", "Mensaje", "Motivo", "Teléfono", "Nombre", "Estado"])
-                for item in filas_visibles:
+                writer.writerow(["uid", "telefono", "tipo", "mensaje", "cuerpo", "estado", "motivo", "dia", "hora", "fechaHora"])
+                for item in filtrados:
                     writer.writerow([
-                        item["fecha_hora"],
-                        item["mensaje"],
-                        item["motivo"],
-                        item["telefono"],
-                        item["nombre"],
-                        item["estado"],
+                        item.get("uid", ""),
+                        item.get("telefono", ""),
+                        item.get("tipo", ""),
+                        item.get("mensaje", ""),
+                        item.get("cuerpo", ""),
+                        item.get("estado", ""),
+                        item.get("motivo", ""),
+                        item.get("dia", ""),
+                        item.get("hora", ""),
+                        formatea_fecha(item.get("fechaHora")),
                     ])
             messagebox.showinfo("Éxito", "CSV exportado correctamente.")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo exportar CSV: {e}")
+            print(f"❌ Error exportando CSV: {e}")
 
     def limpiar():
         if DateEntry:

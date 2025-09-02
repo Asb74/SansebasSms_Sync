@@ -78,6 +78,7 @@ def abrir_generar_mensajes(db):
                 cmb_tipo["values"] = tipos
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los tipos: {e}")
+            print(f"❌ Error cargando tipos: {e}")
 
     def cargar_mensajes_por_tipo(event=None):
         tipo = cmb_tipo.get().strip()
@@ -91,6 +92,7 @@ def abrir_generar_mensajes(db):
             cmb_mensaje.set(mensajes[0] if mensajes else "")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los mensajes: {e}")
+            print(f"❌ Error cargando mensajes del tipo {tipo}: {e}")
 
     cmb_tipo.bind("<<ComboboxSelected>>", cargar_mensajes_por_tipo)
 
@@ -122,6 +124,9 @@ def abrir_generar_mensajes(db):
             return
         hora = f"{h:02d}:{m:02d}"
         fechaHora = datetime(dia_date.year, dia_date.month, dia_date.day, h, m, 0)
+        if fechaHora < datetime.now():
+            messagebox.showerror("Error", "La fecha y hora no pueden estar en el pasado")
+            return
 
         payload = {
             "estado": "Pendiente",
@@ -137,9 +142,11 @@ def abrir_generar_mensajes(db):
         try:
             db.collection("Mensajes").document().set(payload, merge=True)
             messagebox.showinfo("OK", "Mensaje guardado")
+            print(f"✅ Mensaje guardado con fechaHora {fechaHora}")
             ventana_generar.destroy()
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo guardar el mensaje: {e}")
+            print(f"❌ Error guardando mensaje: {e}")
         finally:
             btn_guardar.config(state="normal")
 
