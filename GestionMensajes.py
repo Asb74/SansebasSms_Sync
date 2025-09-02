@@ -98,7 +98,15 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
     ventana_mensajes = tk.Toplevel()
     ventana = ventana_mensajes
     ventana.title("Gestión de Mensajes")
-    ventana.geometry("900x500")
+    ventana.geometry("1400x800")
+    ventana.minsize(1200, 650)
+    try:
+        ventana.state("zoomed")
+    except Exception:
+        pass
+
+    ventana.grid_rowconfigure(1, weight=1)
+    ventana.grid_columnconfigure(0, weight=1)
 
     def on_close():
         global ventana_mensajes
@@ -112,40 +120,42 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
     row_by_doc: Dict[str, dict] = {}
     seleccionados: Set[str] = set()
 
-    frame_top = tk.Frame(ventana)
-    frame_top.pack(fill="x", padx=5, pady=5)
+    filtros_frame = tk.Frame(ventana)
+    filtros_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=6)
+    for i in range(10):
+        filtros_frame.grid_columnconfigure(i, weight=1)
 
     if DateEntry:
-        selector_fecha = DateEntry(frame_top, width=12, date_pattern="dd-mm-yyyy")
+        selector_fecha = DateEntry(filtros_frame, width=12, date_pattern="dd-mm-yyyy")
         selector_fecha.set_date(date.today())
     else:
-        selector_fecha = tk.Entry(frame_top)
+        selector_fecha = tk.Entry(filtros_frame)
         selector_fecha.insert(0, date.today().strftime("%d-%m-%Y"))
         # TODO: reemplazar con DateEntry si se instala tkcalendar
-    selector_fecha.pack(side="left")
+    selector_fecha.grid(row=0, column=0, sticky="ew")
 
-    btn_filtrar = tk.Button(frame_top, text="Filtrar", command=lambda: cargar_mensajes())
-    btn_filtrar.pack(side="left", padx=5)
+    btn_filtrar = tk.Button(filtros_frame, text="Filtrar", command=lambda: cargar_mensajes())
+    btn_filtrar.grid(row=0, column=1, sticky="ew", padx=5)
 
-    tk.Label(frame_top, text="Mensaje (agrupado):").pack(side="left", padx=(20, 5))
+    tk.Label(filtros_frame, text="Mensaje (agrupado):").grid(row=0, column=2, sticky="w", padx=(20, 5))
     combo_var = tk.StringVar()
-    combo_mensajes = ttk.Combobox(frame_top, textvariable=combo_var, state="readonly")
-    combo_mensajes.pack(side="left")
+    combo_mensajes = ttk.Combobox(filtros_frame, textvariable=combo_var, state="readonly")
+    combo_mensajes.grid(row=0, column=3, sticky="ew")
     combo_mensajes['values'] = ["(Todos)"]
     combo_mensajes.current(0)
 
-    tk.Label(frame_top, text="Nombre:").pack(side="left", padx=(20, 5))
-    entry_nombre = tk.Entry(frame_top)
-    entry_nombre.pack(side="left")
+    tk.Label(filtros_frame, text="Nombre:").grid(row=0, column=4, sticky="w", padx=(20, 5))
+    entry_nombre = tk.Entry(filtros_frame)
+    entry_nombre.grid(row=0, column=5, sticky="ew")
 
-    tk.Label(frame_top, text="Estado:").pack(side="left", padx=(20, 5))
-    combo_estado = ttk.Combobox(frame_top, state="readonly")
-    combo_estado.pack(side="left")
+    tk.Label(filtros_frame, text="Estado:").grid(row=0, column=6, sticky="w", padx=(20, 5))
+    combo_estado = ttk.Combobox(filtros_frame, state="readonly")
+    combo_estado.grid(row=0, column=7, sticky="ew")
     combo_estado['values'] = ["(Todos)"]
     combo_estado.current(0)
 
-    btn_limpiar = tk.Button(frame_top, text="Limpiar", command=lambda: limpiar())
-    btn_limpiar.pack(side="left", padx=5)
+    btn_limpiar = tk.Button(filtros_frame, text="Limpiar", command=lambda: limpiar())
+    btn_limpiar.grid(row=0, column=8, sticky="ew", padx=5)
 
     chk_select_all_var = tk.BooleanVar(value=False)
 
@@ -159,15 +169,15 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
         refrescar_checks()
 
     chk_select_all = tk.Checkbutton(
-        frame_top,
+        filtros_frame,
         text="Seleccionar todos (filtrados)",
         variable=chk_select_all_var,
         command=on_select_all,
     )
-    chk_select_all.pack(side="left", padx=20)
+    chk_select_all.grid(row=0, column=9, sticky="w", padx=20)
 
-    frame_tree = tk.Frame(ventana)
-    frame_tree.pack(fill="both", expand=True)
+    tree_frame = ttk.Frame(ventana)
+    tree_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
 
     columnas = [
         "✓",
@@ -184,31 +194,38 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
         "Nombre",
         "doc_id",
     ]
-    tree = ttk.Treeview(frame_tree, columns=columnas, show="headings")
+    xscroll = ttk.Scrollbar(tree_frame, orient="horizontal")
+    yscroll = ttk.Scrollbar(tree_frame, orient="vertical")
+    tree = ttk.Treeview(
+        tree_frame,
+        columns=columnas,
+        show="headings",
+        xscrollcommand=xscroll.set,
+        yscrollcommand=yscroll.set,
+    )
     for col in columnas:
         tree.heading(col, text=col if col != "doc_id" else "")
     tree.column("✓", width=40, anchor="center", stretch=False)
-    tree.column("Tipo", width=80, anchor="w")
-    tree.column("Día", width=80, anchor="w")
-    tree.column("Hora", width=60, anchor="w")
-    tree.column("Mensaje", width=150, anchor="w")
-    tree.column("Cuerpo", width=200, anchor="w")
-    tree.column("Fecha/Hora", width=130, anchor="w")
-    tree.column("UID", width=120, anchor="w")
-    tree.column("Teléfono", width=100, anchor="w")
-    tree.column("Estado", width=80, anchor="w")
-    tree.column("Motivo", width=120, anchor="w")
-    tree.column("Nombre", width=150, anchor="w")
-    tree.column("doc_id", width=0, stretch=False)
+    tree.column("Tipo", width=110, anchor="w", stretch=True)
+    tree.column("Día", width=110, anchor="w", stretch=False)
+    tree.column("Hora", width=80, anchor="w", stretch=False)
+    tree.column("Mensaje", width=200, anchor="w", stretch=True)
+    tree.column("Cuerpo", width=320, anchor="w", stretch=True)
+    tree.column("Fecha/Hora", width=150, anchor="w", stretch=False)
+    tree.column("UID", width=240, anchor="w", stretch=True)
+    tree.column("Teléfono", width=120, anchor="w", stretch=False)
+    tree.column("Estado", width=120, anchor="w", stretch=False)
+    tree.column("Motivo", width=140, anchor="w", stretch=False)
+    tree.column("Nombre", width=220, anchor="w", stretch=True)
+    tree.column("doc_id", width=0, minwidth=0, stretch=False, anchor="w")
 
-    vsb = ttk.Scrollbar(frame_tree, orient="vertical", command=tree.yview)
-    hsb = ttk.Scrollbar(frame_tree, orient="horizontal", command=tree.xview)
-    tree.configure(yscroll=vsb.set, xscroll=hsb.set)
+    yscroll.config(command=tree.yview)
+    xscroll.config(command=tree.xview)
     tree.grid(row=0, column=0, sticky="nsew")
-    vsb.grid(row=0, column=1, sticky="ns")
-    hsb.grid(row=1, column=0, sticky="ew")
-    frame_tree.grid_rowconfigure(0, weight=1)
-    frame_tree.grid_columnconfigure(0, weight=1)
+    yscroll.grid(row=0, column=1, sticky="ns")
+    xscroll.grid(row=1, column=0, sticky="ew")
+    tree_frame.grid_rowconfigure(0, weight=1)
+    tree_frame.grid_columnconfigure(0, weight=1)
 
     def on_tree_click(event):
         region = tree.identify("region", event.x, event.y)
@@ -229,20 +246,21 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
 
     tree.bind("<Button-1>", on_tree_click)
 
-    frame_bottom = tk.Frame(ventana)
-    frame_bottom.pack(fill="x", padx=5, pady=5)
+    bottom_frame = ttk.Frame(ventana)
+    bottom_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 10))
+    bottom_frame.grid_columnconfigure(3, weight=1)
 
-    btn_reenviar = tk.Button(frame_bottom, text="Reenviar Mensajes", state="disabled", command=lambda: on_reenviar())
-    btn_reenviar.pack(side="left")
+    btn_reenviar = tk.Button(bottom_frame, text="Reenviar Mensajes", state="disabled", command=lambda: on_reenviar())
+    btn_reenviar.grid(row=0, column=0, sticky="w")
 
-    btn_exportar = tk.Button(frame_bottom, text="Exportar CSV", command=lambda: exportar_csv())
-    btn_exportar.pack(side="left", padx=5)
+    btn_exportar = tk.Button(bottom_frame, text="Exportar CSV", command=lambda: exportar_csv())
+    btn_exportar.grid(row=0, column=1, sticky="w", padx=5)
 
-    lbl_sel = ttk.Label(frame_bottom, text="0 seleccionados")
-    lbl_sel.pack(side="left", padx=20)
+    lbl_sel = ttk.Label(bottom_frame, text="0 seleccionados")
+    lbl_sel.grid(row=0, column=2, sticky="w", padx=20)
 
     estado_var = tk.StringVar(value="")
-    tk.Label(frame_bottom, textvariable=estado_var).pack(side="right")
+    tk.Label(bottom_frame, textvariable=estado_var).grid(row=0, column=3, sticky="e")
 
     def obtener_fecha():
         if DateEntry:
