@@ -380,7 +380,17 @@ tk.Button(frame, text="📁 Seleccionar carpeta de destino", command=seleccionar
 tk.Button(frame, text="📥 Descargar todas las colecciones", command=descargar_todo, height=2, width=40).pack(pady=5)
 tk.Button(frame, text="📤 Subir archivo Excel a Firebase", command=subir_archivo, height=2, width=40).pack(pady=5)
 tk.Button(frame, text="📨 Revisar mensajes pendientes", command=revisar_mensajes, height=2, width=40).pack(pady=5)
-tk.Button(frame, text="📝 Crear mensajes automáticos", command=crear_mensajes_para_todos, height=2, width=40, bg="lightblue").pack(pady=5)
+
+btn_crear_auto = tk.Button(
+    frame,
+    text="📝 Crear mensajes automáticos",
+    command=crear_mensajes_para_todos,
+    height=2,
+    width=40,
+    bg="lightblue",
+)
+btn_crear_auto.pack(pady=5)
+btn_crear_auto.pack_forget()  # Botón ocultado a petición: "Crear mensajes automáticos"
 tk.Button(frame, text="📲 Enviar notificaciones push", command=enviar_notificaciones_push, height=2, width=40, bg="lightgreen").pack(pady=5)
 tk.Button(frame, text="👥 Gestionar Usuarios", command=lambda: abrir_gestion_usuarios(db), height=2, width=40, bg="lightyellow").pack(pady=5)
 tk.Button(frame, text="📜 Gestionar Mensajes", command=lambda: abrir_gestion_mensajes(db), height=2, width=40).pack(pady=5)
