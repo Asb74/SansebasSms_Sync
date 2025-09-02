@@ -54,16 +54,14 @@ def abrir_generar_mensajes(db, preset=None):
     # --- Hora ---
     ttk.Label(frm, text="Hora:").grid(row=2, column=0, sticky="w", **pad)
     frm_time = ttk.Frame(frm)
+    sp_hora = ttk.Spinbox(frm_time, from_=0, to=23, width=3, state="readonly")
+    ttk.Label(frm_time, text=":").grid(row=0, column=1, padx=2)
+    sp_min = ttk.Spinbox(frm_time, from_=0, to=59, width=3, state="readonly")
+    sp_hora.grid(row=0, column=0)
+    sp_min.grid(row=0, column=2)
+    sp_hora.set("07")
+    sp_min.set("00")
     frm_time.grid(row=2, column=1, sticky="w", **pad)
-    hora_var = tk.StringVar(value="07")
-    min_var = tk.StringVar(value="00")
-    sp_hora = tk.Spinbox(frm_time, from_=0, to=23, width=3, textvariable=hora_var,
-                         state="readonly", wrap=True, format="%02.0f")
-    sp_hora.pack(side="left")
-    ttk.Label(frm_time, text=":").pack(side="left")
-    sp_min = tk.Spinbox(frm_time, from_=0, to=59, width=3, textvariable=min_var,
-                        state="readonly", wrap=True, format="%02.0f")
-    sp_min.pack(side="left")
 
     # --- Mensaje ---
     ttk.Label(frm, text="Mensaje:").grid(row=3, column=0, sticky="w", **pad)
@@ -145,8 +143,8 @@ def abrir_generar_mensajes(db, preset=None):
         if preset.get("hora"):
             try:
                 h, m = preset["hora"].split(":")
-                hora_var.set(h)
-                min_var.set(m)
+                sp_hora.set(h)
+                sp_min.set(m)
             except Exception:
                 pass
         if preset.get("cuerpo"):

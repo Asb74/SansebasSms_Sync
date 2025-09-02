@@ -171,10 +171,11 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
         "Estado",
         "Motivo",
         "Nombre",
+        "doc_id",
     ]
     tree = ttk.Treeview(frame_tree, columns=columnas, show="headings")
     for col in columnas:
-        tree.heading(col, text=col)
+        tree.heading(col, text=col if col != "doc_id" else "")
     tree.column("✓", width=30, anchor="center")
     tree.column("Tipo", width=80, anchor="w")
     tree.column("Día", width=80, anchor="w")
@@ -187,6 +188,7 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
     tree.column("Estado", width=80, anchor="w")
     tree.column("Motivo", width=120, anchor="w")
     tree.column("Nombre", width=150, anchor="w")
+    tree.column("doc_id", width=0, stretch=False)
 
     vsb = ttk.Scrollbar(frame_tree, orient="vertical", command=tree.yview)
     hsb = ttk.Scrollbar(frame_tree, orient="horizontal", command=tree.xview)
@@ -219,7 +221,8 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
 
     def refrescar_checkboxes():
         for iid in tree.get_children():
-            tree.set(iid, "✓", checkbox_imgs[iid in seleccionados])
+            doc_id = tree.set(iid, "doc_id") or iid
+            tree.set(iid, "✓", checkbox_imgs[doc_id in seleccionados])
 
     updating_select_all = False
 
@@ -247,11 +250,12 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
         if col == "#1":
             item = tree.identify_row(event.y)
             if item:
-                if item in seleccionados:
-                    seleccionados.remove(item)
+                doc_id = tree.set(item, "doc_id") or item
+                if doc_id in seleccionados:
+                    seleccionados.remove(doc_id)
                 else:
-                    seleccionados.add(item)
-                tree.set(item, "✓", checkbox_imgs[item in seleccionados])
+                    seleccionados.add(doc_id)
+                tree.set(item, "✓", checkbox_imgs[doc_id in seleccionados])
                 actualizar_contador()
                 sync_select_all()
             return "break"
@@ -299,6 +303,7 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
                     d.get("estado", ""),
                     d.get("motivo", ""),
                     d.get("Nombre", ""),
+                    doc_id,
                 ),
             )
         sync_select_all()
