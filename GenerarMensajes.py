@@ -9,13 +9,24 @@ except Exception:  # pragma: no cover - tkcalendar opcional
 
 ventana_generar = None
 
-def abrir_generar_mensajes(db):
-    """Abre la ventana para generar mensajes masivos."""
+
+def abrir_generar_mensajes(db, preset=None):
+    """Abre la ventana para generar mensajes masivos.
+
+    Parameters
+    ----------
+    db: firestore.Client
+        Conexión a la base de datos.
+    preset: dict | None
+        Valores iniciales opcionales para precargar la interfaz.
+    """
     global ventana_generar
     if ventana_generar and ventana_generar.winfo_exists():
         ventana_generar.lift()
         ventana_generar.focus_force()
         return
+
+    preset = preset or {}
 
     ventana_generar = tk.Toplevel()
     ventana_generar.title("Generar Mensajes")
@@ -65,6 +76,8 @@ def abrir_generar_mensajes(db):
     txt_cuerpo.grid(row=4, column=1, sticky="ew", **pad)
     lbl_contador = ttk.Label(frm, text="0/200")
     lbl_contador.grid(row=5, column=1, sticky="e", **pad)
+    lbl_destinatarios = ttk.Label(frm, text="")
+    lbl_destinatarios.grid(row=6, column=0, columnspan=2, sticky="w", **pad)
 
     def limitar_cuerpo(event=None):
         texto = txt_cuerpo.get("1.0", "end-1c")
@@ -78,7 +91,7 @@ def abrir_generar_mensajes(db):
 
     # --- Botón guardar ---
     btn_guardar = ttk.Button(frm, text="Guardar")
-    btn_guardar.grid(row=6, column=0, columnspan=2, pady=10)
+    btn_guardar.grid(row=7, column=0, columnspan=2, pady=10)
 
     # --- Carga de datos Firestore ---
     def cargar_tipos():
@@ -87,6 +100,12 @@ def abrir_generar_mensajes(db):
             if doc.exists:
                 tipos = [s.strip() for s in doc.to_dict().get("Tipo", "").split(",") if s.strip()]
                 cmb_tipo["values"] = tipos
+                if preset.get("tipo") in tipos:
+                    cmb_tipo.set(preset["tipo"])
+                    cargar_mensajes()
+                elif tipos:
+                    cmb_tipo.set(tipos[0])
+                    cargar_mensajes()
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los tipos: {e}")
 
@@ -102,11 +121,40 @@ def abrir_generar_mensajes(db):
             if doc.exists:
                 mensajes = [s.strip() for s in doc.to_dict().get("Mensaje", "").split(",") if s.strip()]
             cmb_mensaje["values"] = mensajes
-            cmb_mensaje.set(mensajes[0] if mensajes else "")
+            if preset.get("mensaje") in mensajes:
+                cmb_mensaje.set(preset["mensaje"])
+            elif mensajes:
+                cmb_mensaje.set(mensajes[0])
+            else:
+                cmb_mensaje.set("")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los mensajes: {e}")
 
     cmb_tipo.bind("<<ComboboxSelected>>", cargar_mensajes)
+
+    def aplicar_preset_misc():
+        if preset.get("dia"):
+            try:
+                if DateEntry and isinstance(date_entry, DateEntry):
+                    date_entry.set_date(datetime.strptime(preset["dia"], "%Y-%m-%d").date())
+                else:
+                    date_entry.delete(0, tk.END)
+                    date_entry.insert(0, preset["dia"])
+            except Exception:
+                pass
+        if preset.get("hora"):
+            try:
+                h, m = preset["hora"].split(":")
+                hora_var.set(h)
+                min_var.set(m)
+            except Exception:
+                pass
+        if preset.get("cuerpo"):
+            txt_cuerpo.delete("1.0", tk.END)
+            txt_cuerpo.insert("1.0", preset["cuerpo"])
+            limitar_cuerpo()
+        if preset.get("selected_count"):
+            lbl_destinatarios.config(text=f"Reenviar a {preset['selected_count']} usuarios")
 
     # --- Guardar ---
     def guardar():
@@ -180,3 +228,4 @@ def abrir_generar_mensajes(db):
     btn_guardar.config(command=guardar)
 
     cargar_tipos()
+    aplicar_preset_misc()
