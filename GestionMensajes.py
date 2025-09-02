@@ -58,6 +58,35 @@ def fetch_nombre(uid: str, db: firestore.Client) -> str:
     return nombre
 
 
+def reset_all_usuarios_mensaje(db: firestore.Client) -> None:
+    """Establece Mensaje=False en todos los documentos de UsuariosAutorizados."""
+    batch = db.batch()
+    n = 0
+    for doc in db.collection("UsuariosAutorizados").stream():
+        batch.set(doc.reference, {"Mensaje": False}, merge=True)
+        n += 1
+        if n % 450 == 0:
+            batch.commit()
+            batch = db.batch()
+    if n % 450 != 0:
+        batch.commit()
+
+
+def set_usuarios_mensaje_true(db: firestore.Client, uid_set: set[str]) -> None:
+    """Establece Mensaje=True para los uids proporcionados."""
+    batch = db.batch()
+    n = 0
+    for uid in uid_set:
+        ref = db.collection("UsuariosAutorizados").document(uid)
+        batch.set(ref, {"Mensaje": True}, merge=True)
+        n += 1
+        if n % 450 == 0:
+            batch.commit()
+            batch = db.batch()
+    if n % 450 != 0:
+        batch.commit()
+
+
 def abrir_gestion_mensajes(db: firestore.Client) -> None:
     """Abre la ventana de gestión de mensajes evitando duplicados."""
     global ventana_mensajes
@@ -78,7 +107,11 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
 
     ventana.protocol("WM_DELETE_WINDOW", on_close)
 
-    datos_tabla = []
+    rows = []  # datos crudos
+    filtered_rows = []
+    seleccionados = set()
+    checkbox_imgs = {True: "☑", False: "☐"}
+    select_all_var = tk.BooleanVar(value=False)
 
     frame_top = tk.Frame(ventana)
     frame_top.pack(fill="x", padx=5, pady=5)
@@ -94,6 +127,13 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
 
     btn_filtrar = tk.Button(frame_top, text="Filtrar", command=lambda: cargar_mensajes())
     btn_filtrar.pack(side="left", padx=5)
+    chk_select_all = tk.Checkbutton(
+        frame_top,
+        text="Seleccionar todos (filtrados)",
+        variable=select_all_var,
+        command=lambda: toggle_select_all(),
+    )
+    chk_select_all.pack(side="left", padx=5)
 
     tk.Label(frame_top, text="Mensaje (agrupado):").pack(side="left", padx=(20, 5))
     combo_var = tk.StringVar()
@@ -119,6 +159,7 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
     frame_tree.pack(fill="both", expand=True)
 
     columnas = [
+        "✓",
         "Tipo",
         "Día",
         "Hora",
@@ -134,6 +175,7 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
     tree = ttk.Treeview(frame_tree, columns=columnas, show="headings")
     for col in columnas:
         tree.heading(col, text=col)
+    tree.column("✓", width=30, anchor="center")
     tree.column("Tipo", width=80, anchor="w")
     tree.column("Día", width=80, anchor="w")
     tree.column("Hora", width=60, anchor="w")
@@ -154,15 +196,65 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
     hsb.grid(row=1, column=0, sticky="ew")
     frame_tree.grid_rowconfigure(0, weight=1)
     frame_tree.grid_columnconfigure(0, weight=1)
+    tree.bind("<Button-1>", on_tree_click)
 
     frame_bottom = tk.Frame(ventana)
     frame_bottom.pack(fill="x", padx=5, pady=5)
 
+    btn_reenviar = tk.Button(
+        frame_bottom, text="Reenviar Mensajes", state="disabled", command=lambda: on_reenviar()
+    )
+    btn_reenviar.pack(side="left")
+    lbl_sel = tk.Label(frame_bottom, text="0 seleccionados")
+    lbl_sel.pack(side="left", padx=10)
     btn_exportar = tk.Button(frame_bottom, text="Exportar CSV", command=lambda: exportar_csv())
     btn_exportar.pack(side="left")
 
     estado_var = tk.StringVar(value="")
     tk.Label(frame_bottom, textvariable=estado_var).pack(side="right")
+
+    def actualizar_contador():
+        lbl_sel.config(text=f"{len(seleccionados)} seleccionados")
+        btn_reenviar.config(state="normal" if seleccionados else "disabled")
+
+    def refrescar_checkboxes():
+        for iid in tree.get_children():
+            tree.set(iid, "✓", checkbox_imgs[iid in seleccionados])
+
+    updating_select_all = False
+
+    def sync_select_all():
+        nonlocal updating_select_all
+        updating_select_all = True
+        all_vis = filtered_rows and all(r["doc_id"] in seleccionados for r in filtered_rows)
+        select_all_var.set(bool(all_vis))
+        updating_select_all = False
+
+    def toggle_select_all():
+        if updating_select_all:
+            return
+        visibles = [r["doc_id"] for r in filtered_rows]
+        if select_all_var.get():
+            seleccionados.update(visibles)
+        else:
+            for vid in visibles:
+                seleccionados.discard(vid)
+        refrescar_checkboxes()
+        actualizar_contador()
+
+    def on_tree_click(event):
+        col = tree.identify_column(event.x)
+        if col == "#1":
+            item = tree.identify_row(event.y)
+            if item:
+                if item in seleccionados:
+                    seleccionados.remove(item)
+                else:
+                    seleccionados.add(item)
+                tree.set(item, "✓", checkbox_imgs[item in seleccionados])
+                actualizar_contador()
+                sync_select_all()
+            return "break"
 
     def obtener_fecha():
         if DateEntry:
@@ -175,37 +267,48 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
             return None
 
     def aplicar_filtros():
+        nonlocal filtered_rows
         tree.delete(*tree.get_children())
         filtro_mensaje = combo_mensajes.get()
         filtro_estado = combo_estado.get()
         filtro_nombre = entry_nombre.get().strip().lower()
-        filtrados = datos_tabla
+        filtrados = rows
         if filtro_mensaje != "(Todos)":
             filtrados = [d for d in filtrados if d.get("mensaje") == filtro_mensaje]
         if filtro_estado != "(Todos)":
             filtrados = [d for d in filtrados if d.get("estado", "") == filtro_estado]
         if filtro_nombre:
             filtrados = [d for d in filtrados if filtro_nombre in d.get("Nombre", "").lower()]
+        filtered_rows = filtrados
         for d in filtrados:
-            tree.insert("", "end", values=(
-                d.get("tipo", ""),
-                d.get("dia", ""),
-                d.get("hora", ""),
-                d.get("mensaje", ""),
-                d.get("cuerpo", ""),
-                formatea_fecha(d.get("fechaHora")),
-                d.get("uid", ""),
-                d.get("telefono", ""),
-                d.get("estado", ""),
-                d.get("motivo", ""),
-                d.get("Nombre", ""),
-            ))
+            doc_id = d.get("doc_id")
+            tree.insert(
+                "",
+                "end",
+                iid=doc_id,
+                values=(
+                    checkbox_imgs[doc_id in seleccionados],
+                    d.get("tipo", ""),
+                    d.get("dia", ""),
+                    d.get("hora", ""),
+                    d.get("mensaje", ""),
+                    d.get("cuerpo", ""),
+                    formatea_fecha(d.get("fechaHora")),
+                    d.get("uid", ""),
+                    d.get("telefono", ""),
+                    d.get("estado", ""),
+                    d.get("motivo", ""),
+                    d.get("Nombre", ""),
+                ),
+            )
+        sync_select_all()
+        actualizar_contador()
 
     def cargar_mensajes():
         d = obtener_fecha()
         if not d:
             return
-        nonlocal datos_tabla
+        nonlocal rows, seleccionados
         inicio, fin = start_end_of_day(d)
         t0 = time.perf_counter()
         try:
@@ -225,6 +328,7 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
                     motivo = estado_msg or ""
                 nombre = fetch_nombre(uid, db)
                 datos.append({
+                    "doc_id": doc.id,
                     "tipo": item.get("tipo", ""),
                     "dia": item.get("dia", ""),
                     "hora": item.get("hora", ""),
@@ -240,7 +344,9 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
                 mensajes_unicos.add(mensaje or "")
                 estados_unicos.add(estado_msg or "")
             datos.sort(key=lambda x: x.get("fechaHora"), reverse=True)
-            datos_tabla = datos
+            rows = datos
+            seleccionados.clear()
+            select_all_var.set(False)
 
             sel_mensaje = combo_mensajes.get()
             sel_estado = combo_estado.get()
@@ -253,11 +359,55 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
 
             aplicar_filtros()
             ms = int((time.perf_counter() - t0) * 1000)
-            estado_var.set(f"{len(datos_tabla)} resultados · {d.strftime('%d-%m-%Y')} · {ms} ms")
-            print(f"⏱️ cargar_mensajes: {ms} ms ({len(datos_tabla)} registros)")
+            estado_var.set(f"{len(rows)} resultados · {d.strftime('%d-%m-%Y')} · {ms} ms")
+            print(f"⏱️ cargar_mensajes: {ms} ms ({len(rows)} registros)")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los mensajes: {e}")
             print(f"❌ Error cargando mensajes: {e}")
+
+    def on_reenviar():
+        if not seleccionados:
+            messagebox.showwarning("Sin selección", "Selecciona al menos un mensaje.")
+            return
+        uid_set = set()
+        first_row = None
+        for r in rows:
+            if r["doc_id"] in seleccionados:
+                uid = r.get("uid") or r.get("UID")
+                if uid:
+                    uid_set.add(uid)
+                if first_row is None:
+                    first_row = r
+        if not uid_set:
+            messagebox.showwarning("Sin UIDs", "No se encontraron UIDs en la selección.")
+            return
+        if not messagebox.askyesno(
+            "Reenviar", f"Se actualizarán {len(uid_set)} usuarios y se abrirá la generación de mensajes. ¿Continuar?"
+        ):
+            return
+        btn_reenviar.config(state="disabled")
+        ventana.update_idletasks()
+        try:
+            reset_all_usuarios_mensaje(db)
+            set_usuarios_mensaje_true(db, uid_set)
+            preset = None
+            if first_row:
+                preset = {
+                    "tipo": first_row.get("tipo") or first_row.get("Tipo"),
+                    "mensaje": first_row.get("mensaje") or first_row.get("Mensaje"),
+                    "cuerpo": first_row.get("cuerpo") or first_row.get("Cuerpo") or "",
+                    "dia": first_row.get("dia") or first_row.get("Día"),
+                    "hora": first_row.get("hora") or first_row.get("Hora"),
+                    "selected_count": len(uid_set),
+                }
+            from GenerarMensajes import abrir_generar_mensajes
+
+            abrir_generar_mensajes(db, preset=preset)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo reenviar: {e}")
+        finally:
+            btn_reenviar.config(state="normal")
+            cargar_mensajes()
 
     combo_mensajes.bind("<<ComboboxSelected>>", lambda e: aplicar_filtros())
     combo_estado.bind("<<ComboboxSelected>>", lambda e: aplicar_filtros())
@@ -266,7 +416,7 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
         filtro_mensaje = combo_mensajes.get()
         filtro_estado = combo_estado.get()
         filtro_nombre = entry_nombre.get().strip().lower()
-        filtrados = datos_tabla
+        filtrados = rows
         if filtro_mensaje != "(Todos)":
             filtrados = [d for d in filtrados if d.get("mensaje") == filtro_mensaje]
         if filtro_estado != "(Todos)":
