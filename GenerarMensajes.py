@@ -9,7 +9,8 @@ except Exception:  # pragma: no cover - tkcalendar opcional
 
 ventana_generar = None
 
-def abrir_generar_mensajes(db):
+
+def abrir_generar_mensajes(db, preset=None):
     """Abre la ventana para generar mensajes masivos."""
     global ventana_generar
     if ventana_generar and ventana_generar.winfo_exists():
@@ -22,9 +23,13 @@ def abrir_generar_mensajes(db):
     ventana_generar.resizable(False, False)
 
     frm = ttk.Frame(ventana_generar, padding=10)
-    frm.grid(sticky="nsew")
+    row_index = 1 if preset and preset.get("selected_count") else 0
+    frm.grid(row=row_index, column=0, sticky="nsew")
     frm.columnconfigure(1, weight=1)
     pad = {"padx": 10, "pady": 6}
+
+    if preset and preset.get("selected_count"):
+        ttk.Label(ventana_generar, text=f"Reenviar a {preset['selected_count']} usuarios").grid(row=0, column=0, columnspan=2, pady=(0, 6))
 
     # --- Tipo ---
     ttk.Label(frm, text="Tipo:").grid(row=0, column=0, sticky="w", **pad)
@@ -43,16 +48,14 @@ def abrir_generar_mensajes(db):
     # --- Hora ---
     ttk.Label(frm, text="Hora:").grid(row=2, column=0, sticky="w", **pad)
     frm_time = ttk.Frame(frm)
+    sp_hora = ttk.Spinbox(frm_time, from_=0, to=23, width=3, state="readonly", wrap=True, format="%02.0f")
+    ttk.Label(frm_time, text=":").grid(row=0, column=1, padx=2)
+    sp_min = ttk.Spinbox(frm_time, from_=0, to=59, width=3, state="readonly", wrap=True, format="%02.0f")
+    sp_hora.grid(row=0, column=0)
+    sp_min.grid(row=0, column=2)
+    sp_hora.set("07")
+    sp_min.set("00")
     frm_time.grid(row=2, column=1, sticky="w", **pad)
-    hora_var = tk.StringVar(value="07")
-    min_var = tk.StringVar(value="00")
-    sp_hora = tk.Spinbox(frm_time, from_=0, to=23, width=3, textvariable=hora_var,
-                         state="readonly", wrap=True, format="%02.0f")
-    sp_hora.pack(side="left")
-    ttk.Label(frm_time, text=":").pack(side="left")
-    sp_min = tk.Spinbox(frm_time, from_=0, to=59, width=3, textvariable=min_var,
-                        state="readonly", wrap=True, format="%02.0f")
-    sp_min.pack(side="left")
 
     # --- Mensaje ---
     ttk.Label(frm, text="Mensaje:").grid(row=3, column=0, sticky="w", **pad)
@@ -90,7 +93,7 @@ def abrir_generar_mensajes(db):
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los tipos: {e}")
 
-    def cargar_mensajes(event=None):
+    def cargar_mensajes_por_tipo(event=None):
         tipo = cmb_tipo.get().strip()
         if not tipo:
             cmb_mensaje["values"] = []
@@ -106,7 +109,7 @@ def abrir_generar_mensajes(db):
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron cargar los mensajes: {e}")
 
-    cmb_tipo.bind("<<ComboboxSelected>>", cargar_mensajes)
+    cmb_tipo.bind("<<ComboboxSelected>>", cargar_mensajes_por_tipo)
 
     # --- Guardar ---
     def guardar():
@@ -148,12 +151,7 @@ def abrir_generar_mensajes(db):
                 data_u = doc_user.to_dict() or {}
                 uid = doc_user.id
                 telefono = data_u.get("Telefono") or data_u.get("telefono") or ""
-                base_id = f"{uid}_{fechaHora.strftime('%Y%m%d%H%M')}"
-                doc_id = base_id
-                suf = 1
-                while db.collection("Mensajes").document(doc_id).get().exists:
-                    doc_id = f"{base_id}_{suf}"
-                    suf += 1
+                doc_id = f"{uid}_{fechaHora.strftime('%Y%m%d%H%M')}"
                 payload = {
                     "uid": uid,
                     "telefono": telefono,
@@ -179,4 +177,23 @@ def abrir_generar_mensajes(db):
 
     btn_guardar.config(command=guardar)
 
+    def aplicar_preset(preset):
+        if not preset:
+            return
+        cmb_tipo.set(preset.get("tipo", ""))
+        cargar_mensajes_por_tipo()
+        cmb_mensaje.set(preset.get("mensaje", ""))
+        txt_cuerpo.delete("1.0", "end")
+        txt_cuerpo.insert("1.0", preset.get("cuerpo", ""))
+        dia_str = preset.get("dia")
+        if dia_str:
+            from datetime import datetime as _dt
+            date_entry.set_date(_dt.strptime(dia_str, "%Y-%m-%d").date())
+        hora_str = preset.get("hora") or ""
+        if ":" in hora_str:
+            h, m = hora_str.split(":", 1)
+            sp_hora.set(h)
+            sp_min.set(m)
+
     cargar_tipos()
+    aplicar_preset(preset)
