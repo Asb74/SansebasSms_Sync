@@ -155,7 +155,6 @@ def abrir_generar_mensajes(db, preset=None):
                 payload = {
                     "uid": uid,
                     "telefono": telefono,
-                    "estado": "Pendiente",
                     "motivo": "Pendiente",
                     "tipo": tipo,
                     "mensaje": mensaje,
@@ -164,6 +163,8 @@ def abrir_generar_mensajes(db, preset=None):
                     "hora": hora_str,
                     "fechaHora": fechaHora,
                 }
+                # Aseguramos que todos los nuevos mensajes comiencen como Pendiente
+                payload["estado"] = "Pendiente"
                 db.collection("Mensajes").document(doc_id).set(payload, merge=True)
                 count += 1
                 ventana_generar.update_idletasks()

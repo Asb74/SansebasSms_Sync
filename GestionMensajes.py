@@ -3,6 +3,8 @@ from tkinter import ttk, messagebox, filedialog
 import csv
 from datetime import datetime, date, timedelta
 import time
+import json
+import os
 from typing import Dict, Tuple, List, Set
 import re
 
@@ -41,6 +43,42 @@ def set_usuarios_mensaje_true(db: firestore.Client, uid_set: Set[str]) -> None:
             batch = db.batch()
     if n % 450 != 0:
         batch.commit()
+
+
+def marcar_mensajes_pendientes(db: firestore.Client, doc_ids: List[str]) -> None:
+    """Hace batch update en 'Mensajes/{id}' => {'estado': 'Pendiente'}"""
+    if not doc_ids:
+        return
+    batch = db.batch()
+    n = 0
+    for mid in doc_ids:
+        ref = db.collection("Mensajes").document(mid)
+        batch.set(ref, {"estado": "Pendiente"}, merge=True)
+        n += 1
+        if n % 450 == 0:
+            batch.commit()
+            batch = db.batch()
+    if n % 450 != 0:
+        batch.commit()
+
+
+def limpiar_notificados_local(doc_ids: List[str], archivo_notificados: str) -> None:
+    """Abre archivo_notificados (JSON con lista de ids) y elimina los doc_ids indicados."""
+    if not doc_ids or not archivo_notificados:
+        return
+    try:
+        if not os.path.exists(archivo_notificados):
+            return
+        with open(archivo_notificados, "r", encoding="utf-8") as f:
+            lista = json.load(f) or []
+        original_len = len(lista)
+        nuevo = [x for x in lista if x not in set(doc_ids)]
+        if len(nuevo) != original_len:
+            with open(archivo_notificados, "w", encoding="utf-8") as f:
+                json.dump(nuevo, f, ensure_ascii=False)
+    except Exception:
+        # No romper el flujo si falla el archivo local
+        pass
 
 nombre_cache: Dict[str, str] = {}
 
@@ -369,7 +407,10 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
     def on_reenviar():
         if not seleccionados:
             return
-        uid_set = {row_by_doc[doc_id]["uid"] for doc_id in seleccionados if doc_id in row_by_doc}
+        doc_ids_sel = [doc_id for doc_id in seleccionados if doc_id in row_by_doc]
+        if not doc_ids_sel:
+            return
+        uid_set = {row_by_doc[doc_id]["uid"] for doc_id in doc_ids_sel if row_by_doc[doc_id].get("uid")}
         if not uid_set:
             return
         if not messagebox.askyesno("Confirmar", f"¿Reenviar mensajes a {len(uid_set)} usuarios?"):
@@ -377,14 +418,20 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
         btn_reenviar.config(state="disabled")
         ventana.update_idletasks()
         try:
+            marcar_mensajes_pendientes(db, doc_ids_sel)
+            try:
+                from main import archivo_notificados  # type: ignore
+            except Exception:
+                archivo_notificados = "notificados.json"
+            limpiar_notificados_local(doc_ids_sel, archivo_notificados)
             reset_all_usuarios_mensaje(db)
             set_usuarios_mensaje_true(db, uid_set)
-            first_id = next(iter(seleccionados))
+            first_id = doc_ids_sel[0]
             first_row = row_by_doc[first_id]
             preset = {k: first_row.get(k, "") for k in ("tipo", "mensaje", "cuerpo", "dia", "hora")}
             for k in ("tipo", "mensaje", "cuerpo", "dia", "hora"):
                 v = first_row.get(k)
-                if not all(row_by_doc[s].get(k) == v for s in seleccionados):
+                if not all(row_by_doc[s].get(k) == v for s in doc_ids_sel):
                     preset[k] = v
             preset["selected_count"] = len(uid_set)
             from GenerarMensajes import abrir_generar_mensajes
