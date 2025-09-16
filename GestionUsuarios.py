@@ -14,6 +14,54 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 
 
+DATE_RE = re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})")
+
+
+def parse_baja_texto_largo(raw: str) -> date | None:
+    """Devuelve la **última** fecha válida encontrada en el texto (dd/mm/yy|yyyy o dd-mm-yy|yyyy)."""
+    if not raw:
+        return None
+    s = str(raw).strip()
+    matches = DATE_RE.findall(s)
+    if not matches:
+        return None
+    for d, m, y in reversed(matches):
+        try:
+            d, m = int(d), int(m)
+            y = int(y)
+            if y < 100:
+                y = 2000 + y if y <= 50 else 1900 + y
+            return date(y, m, d)
+        except ValueError:
+            continue
+    return None
+
+
+def parse_access_date(raw) -> date | None:
+    """Convierte valores Access (datetime, str, número OLE) a date."""
+    if raw is None:
+        return None
+    if isinstance(raw, datetime.datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
+    if hasattr(raw, "date"):
+        try:
+            return raw.date()
+        except Exception:
+            pass
+    if isinstance(raw, (int, float)):
+        return date(1899, 12, 30) + timedelta(days=float(raw))
+    if isinstance(raw, str):
+        for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y"):
+            try:
+                return datetime.datetime.strptime(raw.strip(), fmt).date()
+            except Exception:
+                pass
+        return parse_baja_texto_largo(raw)
+    return None
+
+
 # Ventana principal de gestión de usuarios (singleton)
 ventana_usuarios = None
 
@@ -36,6 +84,9 @@ def normalizar_dni(dni):
 def to_date(x):
     if x is None or x == "":
         return None
+    parsed = parse_access_date(x)
+    if parsed:
+        return parsed
     try:
         if hasattr(x, "date"):
             return x.date()
@@ -54,7 +105,7 @@ def to_date(x):
 
 
 def fmt_dmy(d):
-    return d.strftime("%d-%m-%Y") if isinstance(d, date) else None
+    return d.strftime("%d-%m-%Y") if d else None
 
 
 def _date_to_str_ddmmyyyy(d: Optional[date]) -> Optional[str]:
@@ -242,17 +293,21 @@ def calcular_baja_y_totales(
     fecha_alta: Optional[date] = None
     fecha_baja: Optional[date] = None
     baja_str: Optional[str] = None
-    total_dia = 0
-    total_horas = 0.0
+    dni_param = (dni or "").strip().upper()
+
+    if not dni_param:
+        return baja_str, 0, 0.0, fecha_alta, fecha_baja
 
     row = cursor.execute(
-        "SELECT FECHAALTA, FECHABAJA FROM TRABAJADORES WHERE DNI = ?",
-        (dni,)
+        "SELECT FECHAALTA, FECHABAJA FROM TRABAJADORES WHERE Trim(UCase(DNI)) = ?",
+        (dni_param,)
     ).fetchone()
-    if row:
-        fecha_alta = to_date(getattr(row, 'FECHAALTA', None))
-        fecha_baja = to_date(getattr(row, 'FECHABAJA', None))
-        baja_str = fmt_dmy(fecha_baja)
+
+    raw_baja = getattr(row, 'FECHABAJA', None) if row else None
+    fecha_alta = parse_access_date(getattr(row, 'FECHAALTA', None)) if row else None
+    fecha_baja = parse_access_date(raw_baja) if row else None
+    baja_str = fmt_dmy(fecha_baja)
+    print(f"[TRAB] DNI={dni_param} FECHABAJA_raw={raw_baja!r} -> baja={baja_str}")
 
     if fecha_baja:
         return baja_str, 0, 0.0, fecha_alta, fecha_baja
@@ -261,14 +316,17 @@ def calcular_baja_y_totales(
         return baja_str, 0, 0.0, fecha_alta, fecha_baja
 
     filas = cursor.execute(
-        "SELECT FECHA, HORAS, HORASEXT FROM DATOS_AJUSTADOS WHERE DNI = ? AND FECHA >= ?",
-        (dni, fecha_alta)
+        "SELECT FECHA, HORAS, HORASEXT FROM DATOS_AJUSTADOS WHERE Trim(UCase(DNI)) = ? AND FECHA >= ?",
+        (dni_param, fecha_alta)
     ).fetchall()
+
+    if not filas:
+        return baja_str, 0, 0.0, fecha_alta, fecha_baja
 
     fechas = set()
     horas_acum = 0.0
     for fila in filas:
-        fecha_reg = to_date(getattr(fila, 'FECHA', None))
+        fecha_reg = parse_access_date(getattr(fila, 'FECHA', None))
         if fecha_reg:
             fechas.add(fecha_reg)
         horas_acum += _to_float_safe(getattr(fila, 'HORAS', 0))
@@ -276,10 +334,6 @@ def calcular_baja_y_totales(
 
     total_dia = len(fechas)
     total_horas = round(horas_acum, 2)
-
-    if not filas:
-        total_dia = 0
-        total_horas = 0.0
 
     return baja_str, total_dia, total_horas, fecha_alta, fecha_baja
 
@@ -557,7 +611,7 @@ def abrir_gestion_usuarios(db):
                 data["Dni"] = dni_normalizado or "Falta"
 
                 total_dia_actual = _to_int_safe(data.get("TotalDia"))
-                total_horas_actual = round(_to_float_safe(data.get("TotalHoras")), 2)
+                total_horas_actual = float(round(_to_float_safe(data.get("TotalHoras")), 2))
                 baja_actual_norm = _normalize_optional_str(data.get("Baja"))
 
                 if dni_normalizado:
@@ -582,7 +636,7 @@ def abrir_gestion_usuarios(db):
                 totales_info = calcular_totales_y_baja(dni_normalizado)
                 baja_str = totales_info.get("baja_str")
                 total_dia_calculado = _to_int_safe(totales_info.get("total_dia"))
-                total_horas_calculado = round(_to_float_safe(totales_info.get("total_horas")), 2)
+                total_horas_calculado = float(round(_to_float_safe(totales_info.get("total_horas")), 2))
                 fecha_alta_calc = totales_info.get("fecha_alta")
 
                 if fecha_alta_calc and not s_trim(data.get("Alta")):
@@ -591,17 +645,24 @@ def abrir_gestion_usuarios(db):
                         actualiza["Alta"] = alta_calc_str
                         data["Alta"] = alta_calc_str
 
-                if baja_str != baja_actual_norm:
-                    actualiza["Baja"] = baja_str
-                data["Baja"] = baja_str
+                updates = {
+                    "Baja": baja_str,
+                    "TotalDia": int(total_dia_calculado),
+                    "TotalHoras": float(round(total_horas_calculado, 2)),
+                }
 
-                if total_dia_calculado != total_dia_actual:
-                    actualiza["TotalDia"] = total_dia_calculado
-                data["TotalDia"] = total_dia_calculado
+                baja_nueva_norm = _normalize_optional_str(updates["Baja"])
+                if baja_nueva_norm != baja_actual_norm:
+                    actualiza["Baja"] = updates["Baja"]
+                data["Baja"] = updates["Baja"]
 
-                if total_horas_calculado != total_horas_actual:
-                    actualiza["TotalHoras"] = total_horas_calculado
-                data["TotalHoras"] = total_horas_calculado
+                if updates["TotalDia"] != total_dia_actual:
+                    actualiza["TotalDia"] = updates["TotalDia"]
+                data["TotalDia"] = updates["TotalDia"]
+
+                if updates["TotalHoras"] != total_horas_actual:
+                    actualiza["TotalHoras"] = updates["TotalHoras"]
+                data["TotalHoras"] = updates["TotalHoras"]
 
                 ajust = ajust_by_dni.get(dni_normalizado, {})
                 if ajust:
