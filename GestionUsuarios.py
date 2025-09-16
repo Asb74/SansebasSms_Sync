@@ -52,6 +52,51 @@ def _date_to_str_ddmmyyyy(d: Optional[date]) -> Optional[str]:
     return d.strftime("%d-%m-%Y") if isinstance(d, date) else None
 
 
+def _normalize_optional_str(value: Optional[Union[str, date]]) -> Optional[str]:
+    if isinstance(value, date):
+        return _date_to_str_ddmmyyyy(value)
+    if value is None:
+        return None
+    texto = str(value).strip()
+    return texto or None
+
+
+def _to_int_safe(value: Union[str, int, float, Decimal, None], default: int = 0) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int,)):
+        return int(value)
+    try:
+        if isinstance(value, (float, Decimal)):
+            return int(value)
+        texto = str(value).strip()
+        if not texto:
+            return default
+        return int(float(texto.replace(',', '.')))
+    except (ValueError, TypeError):
+        return default
+
+
+def _to_float_safe(value: Union[str, int, float, Decimal, None], default: float = 0.0) -> float:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        texto = str(value).strip().replace(',', '.')
+        if not texto:
+            return default
+        return float(texto)
+    except (ValueError, TypeError):
+        return default
+
+
 def _chunk_iterable(iterable: Iterable, size: int):
     """Yield successive chunks of given size from iterable."""
     chunk = []
@@ -100,6 +145,7 @@ def cargar_trabajadores(dnis: Iterable[str]) -> Dict[str, Dict[str, Optional[Uni
                     'Baja': _date_to_str_ddmmyyyy(baja_dt),
                     'Codigo': s_trim(getattr(row, 'CODIGO', None)),
                     'AltaDate': alta_dt,
+                    'BajaDate': baja_dt,
                 }
         cursor.close()
         conn.close()
@@ -178,6 +224,72 @@ def cargar_datos_ajustados(
             'Puesto': info['Puesto'],
         }
     return final
+
+
+def calcular_totales_y_baja(dni: str) -> Dict[str, Union[int, float, Optional[date], Optional[str]]]:
+    resultado: Dict[str, Union[int, float, Optional[date], Optional[str]]] = {
+        'total_dia': 0,
+        'total_horas': 0.0,
+        'fecha_alta': None,
+        'fecha_baja': None,
+        'baja_str': None,
+    }
+    dni_normalizado = normalizar_dni(dni)
+    if not dni_normalizado:
+        return resultado
+
+    ruta = r'X:\ENLACES\Power BI\Campaña\PercecoBi(Campaña).mdb'
+    if not os.path.exists(ruta):
+        return resultado
+
+    conn_str = (
+        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};'
+        f'DBQ={ruta};'
+    )
+
+    conn = None
+    cursor = None
+    try:
+        conn = pyodbc.connect(str(conn_str))
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT FECHAALTA, FECHABAJA FROM TRABAJADORES WHERE DNI = ?",
+            (dni_normalizado,)
+        )
+        row_trab = cursor.fetchone()
+        fecha_alta = to_date(getattr(row_trab, 'FECHAALTA', None)) if row_trab else None
+        fecha_baja = to_date(getattr(row_trab, 'FECHABAJA', None)) if row_trab else None
+        baja_str = _date_to_str_ddmmyyyy(fecha_baja)
+        resultado['fecha_alta'] = fecha_alta
+        resultado['fecha_baja'] = fecha_baja
+        resultado['baja_str'] = baja_str
+
+        if fecha_baja or not fecha_alta:
+            return resultado
+
+        cursor.execute(
+            "SELECT FECHA, HORAS, HORASEXT FROM DATOS_AJUSTADOS WHERE DNI = ? AND FECHA >= ?",
+            (dni_normalizado, fecha_alta)
+        )
+        fechas = set()
+        horas_total = 0.0
+        for row in cursor.fetchall():
+            fecha = to_date(getattr(row, 'FECHA', None))
+            if fecha:
+                fechas.add(fecha)
+            horas = _to_float_safe(getattr(row, 'HORAS', 0))
+            horas_ext = _to_float_safe(getattr(row, 'HORASEXT', 0))
+            horas_total += horas + horas_ext
+        resultado['total_dia'] = len(fechas)
+        resultado['total_horas'] = round(horas_total, 2)
+    except Exception as e:
+        print(f"⚠️ Error calculando totales para {dni_normalizado}: {e}")
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+    return resultado
 
 def abrir_gestion_usuarios(db):
     """Abre la ventana de gestión de usuarios evitando duplicados."""
@@ -403,72 +515,101 @@ def abrir_gestion_usuarios(db):
 
         def procesar_doc(doc):
             uid = doc.id
-            data = doc.to_dict()
-            actualiza = {}
-            dni = normalizar_dni(data.get("Dni")) or "Falta"
-            data["Dni"] = dni
+            data = doc.to_dict() or {}
+            try:
+                actualiza = {}
+                dni_original = data.get("Dni")
+                dni_normalizado = normalizar_dni(dni_original)
+                data["Dni"] = dni_normalizado or "Falta"
 
-            if dni != "Falta":
-                trab = trab_by_dni.get(dni, {})
-                if trab:
-                    for campo in ("Nombre", "Alta", "Baja", "Codigo"):
-                        val = trab.get(campo)
-                        if val and val != data.get(campo):
-                            actualiza[campo] = val
-                            data[campo] = val
+                total_dia_actual = _to_int_safe(data.get("TotalDia"))
+                total_horas_actual = round(_to_float_safe(data.get("TotalHoras")), 2)
+                baja_actual_norm = _normalize_optional_str(data.get("Baja"))
+
+                if dni_normalizado:
+                    trab = trab_by_dni.get(dni_normalizado, {})
+                    if trab:
+                        for campo in ("Nombre", "Alta", "Codigo"):
+                            val = trab.get(campo)
+                            if val and val != data.get(campo):
+                                actualiza[campo] = val
+                                data[campo] = val
+                    else:
+                        actualiza["Mensaje"] = False
+                        actualiza["Seleccionable"] = False
+                        data["Mensaje"] = False
+                        data["Seleccionable"] = False
                 else:
                     actualiza["Mensaje"] = False
                     actualiza["Seleccionable"] = False
                     data["Mensaje"] = False
                     data["Seleccionable"] = False
-            else:
-                actualiza["Mensaje"] = False
-                actualiza["Seleccionable"] = False
-                data["Mensaje"] = False
-                data["Seleccionable"] = False
 
-            ajust = ajust_by_dni.get(dni, {})
-            if ajust:
-                ultima = ajust.get("UltimoDia")
-                if ultima:
-                    ultima_str = _date_to_str_ddmmyyyy(ultima)
-                    if ultima_str != data.get("UltimoDia"):
-                        actualiza["UltimoDia"] = ultima_str
-                        data["UltimoDia"] = ultima_str
-                if ajust.get("TotalDia") != data.get("TotalDia"):
-                    actualiza["TotalDia"] = ajust.get("TotalDia")
-                    data["TotalDia"] = ajust.get("TotalDia")
-                if round(float(ajust.get("TotalHoras", 0)), 2) != round(float(data.get("TotalHoras", 0)), 2):
-                    actualiza["TotalHoras"] = ajust.get("TotalHoras")
-                    data["TotalHoras"] = ajust.get("TotalHoras")
-                puesto = ajust.get("Puesto")
-                if puesto and puesto != data.get("Puesto"):
-                    actualiza["Puesto"] = puesto
-                    data["Puesto"] = puesto
-            if data.get("Baja"):
-                actualiza["Mensaje"] = False
-                actualiza["Seleccionable"] = False
-                data["Mensaje"] = False
-                data["Seleccionable"] = False
+                totales_info = calcular_totales_y_baja(dni_normalizado)
+                baja_str = totales_info.get("baja_str")
+                total_dia_calculado = _to_int_safe(totales_info.get("total_dia"))
+                total_horas_calculado = round(_to_float_safe(totales_info.get("total_horas")), 2)
+                fecha_alta_calc = totales_info.get("fecha_alta")
 
-            data["Nombre"] = data.get("Nombre", "Falta")
-            data["Telefono"] = data.get("Telefono", "")
-            data["correo"] = data.get("correo", "")
-            data["Puesto"] = data.get("Puesto", "Falta")
-            data["Turno"] = str(data.get("Turno", "1"))
-            data["Cultivo"] = data.get("Cultivo", "Falta")
-            data["Mensaje"] = str(data.get("Mensaje", False))
-            data["Seleccionable"] = str(data.get("Seleccionable", True))
-            data["Valor"] = str(data.get("Valor", False))
-            data["Alta"] = data.get("Alta") or _date_to_str_ddmmyyyy(hoy)
-            data["UltimoDia"] = data.get("UltimoDia") or _date_to_str_ddmmyyyy(hoy)
-            data["TotalDia"] = str(data.get("TotalDia", "0"))
-            data["TotalHoras"] = str(data.get("TotalHoras", "0.0"))
-            data["Baja"] = data.get("Baja")
-            data["Codigo"] = s_trim(data.get("Codigo")) or ""
+                if fecha_alta_calc and not s_trim(data.get("Alta")):
+                    alta_calc_str = _date_to_str_ddmmyyyy(fecha_alta_calc)
+                    if alta_calc_str:
+                        actualiza["Alta"] = alta_calc_str
+                        data["Alta"] = alta_calc_str
 
-            fila = {"UID": uid, **{col: data.get(col, "") for col in columnas}}
-            return uid, fila, actualiza
+                if baja_str != baja_actual_norm:
+                    actualiza["Baja"] = baja_str
+                data["Baja"] = baja_str
+
+                if total_dia_calculado != total_dia_actual:
+                    actualiza["TotalDia"] = total_dia_calculado
+                data["TotalDia"] = total_dia_calculado
+
+                if total_horas_calculado != total_horas_actual:
+                    actualiza["TotalHoras"] = total_horas_calculado
+                data["TotalHoras"] = total_horas_calculado
+
+                ajust = ajust_by_dni.get(dni_normalizado, {})
+                if ajust:
+                    ultima = ajust.get("UltimoDia")
+                    if ultima:
+                        ultima_str = _date_to_str_ddmmyyyy(ultima)
+                        if ultima_str != data.get("UltimoDia"):
+                            actualiza["UltimoDia"] = ultima_str
+                            data["UltimoDia"] = ultima_str
+                    puesto = ajust.get("Puesto")
+                    if puesto and puesto != data.get("Puesto"):
+                        actualiza["Puesto"] = puesto
+                        data["Puesto"] = puesto
+
+                if baja_str:
+                    actualiza["Mensaje"] = False
+                    actualiza["Seleccionable"] = False
+                    data["Mensaje"] = False
+                    data["Seleccionable"] = False
+
+                data["Nombre"] = data.get("Nombre", "Falta")
+                data["Telefono"] = data.get("Telefono", "")
+                data["correo"] = data.get("correo", "")
+                data["Puesto"] = data.get("Puesto", "Falta")
+                data["Turno"] = str(data.get("Turno", "1"))
+                data["Cultivo"] = data.get("Cultivo", "Falta")
+                data["Mensaje"] = str(data.get("Mensaje", False))
+                data["Seleccionable"] = str(data.get("Seleccionable", True))
+                data["Valor"] = str(data.get("Valor", False))
+                data["Alta"] = data.get("Alta") or _date_to_str_ddmmyyyy(hoy)
+                data["UltimoDia"] = data.get("UltimoDia") or _date_to_str_ddmmyyyy(hoy)
+                data["TotalDia"] = str(total_dia_calculado)
+                data["TotalHoras"] = f"{total_horas_calculado:.2f}"
+                data["Baja"] = data.get("Baja") or ""
+                data["Codigo"] = s_trim(data.get("Codigo")) or ""
+
+                fila = {"UID": uid, **{col: data.get(col, "") for col in columnas}}
+                return uid, fila, actualiza
+            except Exception as e:
+                print(f"❌ Error procesando {uid}: {e}")
+                fila = {"UID": uid, **{col: data.get(col, "") for col in columnas}}
+                return uid, fila, {}
 
         with ThreadPoolExecutor(max_workers=8) as ex:
             resultados = list(ex.map(procesar_doc, usuarios_docs))
