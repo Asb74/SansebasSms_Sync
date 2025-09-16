@@ -12,6 +12,7 @@ from typing import Optional, Union, Dict, Iterable, Tuple
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import time
+import math
 
 
 DATE_RE = re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})")
@@ -413,8 +414,11 @@ def abrir_gestion_usuarios(db):
     datos_originales = []
     entradas_filtro = {}
 
+    ventana.grid_rowconfigure(2, weight=1)
+    ventana.grid_columnconfigure(0, weight=1)
+
     frame_filtros = tk.Frame(ventana)
-    frame_filtros.pack(fill="x")
+    frame_filtros.grid(row=0, column=0, sticky="ew")
 
     frame_labels = tk.Frame(frame_filtros)
     frame_labels.pack(fill="x")
@@ -432,32 +436,72 @@ def abrir_gestion_usuarios(db):
         frame_entries.grid_columnconfigure(idx, weight=1)
 
     frame_botones = tk.Frame(ventana)
-    frame_botones.pack(pady=5)
+    frame_botones.grid(row=1, column=0, sticky="ew", pady=5)
 
     tabla_frame = tk.Frame(ventana)
-    tabla_frame.pack(fill="both", expand=True)
+    tabla_frame.grid(row=2, column=0, sticky="nsew")
+    tabla_frame.grid_rowconfigure(0, weight=1)
+    tabla_frame.grid_columnconfigure(0, weight=1)
 
-    canvas = tk.Canvas(tabla_frame)
-    canvas.pack(side="left", fill="both", expand=True)
-
-    scrollbar_y = ttk.Scrollbar(tabla_frame, orient="vertical", command=canvas.yview)
-    scrollbar_y.pack(side="right", fill="y")
-
-    tabla_canvas_frame = tk.Frame(canvas)
-    canvas.create_window((0, 0), window=tabla_canvas_frame, anchor="nw")
-
-    tabla = ttk.Treeview(tabla_canvas_frame, columns=columnas, show="headings", selectmode="extended")
-    tabla.grid(row=0, column=0, sticky="nsew")
+    tree = ttk.Treeview(tabla_frame, columns=columnas, show="headings", selectmode="extended")
+    tree.grid(row=0, column=0, sticky="nsew")
     orden_actual = {col: None for col in columnas}
 
-    scrollbar_x = ttk.Scrollbar(ventana, orient="horizontal", command=canvas.xview)
-    scrollbar_x.pack(side="bottom", fill="x")
-    canvas.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+    scrollbar_y = ttk.Scrollbar(tabla_frame, orient="vertical", command=tree.yview)
+    scrollbar_y.grid(row=0, column=1, sticky="ns")
 
-    tabla_canvas_frame.grid_rowconfigure(0, weight=1)
-    tabla_canvas_frame.grid_columnconfigure(0, weight=1)
+    scrollbar_x = ttk.Scrollbar(tabla_frame, orient="horizontal", command=tree.xview)
+    scrollbar_x.grid(row=1, column=0, sticky="ew")
+
+    tree.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+
+    frame_status = ttk.Frame(ventana)
+    frame_status.grid(row=3, column=0, sticky="ew")
+    frame_status.grid_columnconfigure(0, weight=1)
+    contador_var = tk.StringVar(value="Seleccionados con Mensaje=True: 0")
+    ttk.Label(frame_status).grid(row=0, column=0, sticky="ew")
+    ttk.Label(frame_status, textvariable=contador_var).grid(row=0, column=1, sticky="e", padx=10, pady=5)
+
+    COL_INDEX = {name: i for i, name in enumerate(tree["columns"])}
+
+    def _cell(item, col_name):
+        vals = tree.item(item, "values")
+        idx = COL_INDEX[col_name]
+        return vals[idx] if idx < len(vals) else None
+
+    def _is_true(x):
+        return str(x).strip().lower() in ("true", "1", "sí", "si")
+
+    def actualizar_contador(*_):
+        seleccion = tree.selection()
+        n = 0
+        for it in seleccion:
+            if _is_true(_cell(it, "Mensaje")):
+                n += 1
+        contador_var.set(f"Seleccionados con Mensaje=True: {n}")
+
+    style = ttk.Style()
+
+    def _row_height():
+        h = style.lookup("Treeview", "rowheight")
+        try:
+            return int(h)
+        except Exception:
+            return 20  # fallback
+
+    def ajustar_altura_tree(*_):
+        tree.update_idletasks()
+        n_rows = len(tree.get_children(""))
+        H = table_frame.winfo_height() or tree.winfo_height()
+        margen = 40
+        rh = max(_row_height(), 1)
+        disponible = max(0, H - margen)
+        max_rows_fit = max(3, math.floor(disponible / rh))
+        altura = min(n_rows, max_rows_fit)
+        tree.configure(height=altura)
+
     def ordenar_columna(col):
-        datos = [(tabla.set(iid, col), iid) for iid in tabla.get_children()]
+        datos = [(tree.set(iid, col), iid) for iid in tree.get_children()]
         reverse = orden_actual[col] == "asc"
 
         def convertir(valor):
@@ -471,7 +515,7 @@ def abrir_gestion_usuarios(db):
 
         datos.sort(key=lambda x: convertir(x[0]), reverse=reverse)
         for idx, (val, iid) in enumerate(datos):
-            tabla.move(iid, '', idx)
+            tree.move(iid, '', idx)
 
         orden_actual[col] = "desc" if reverse else "asc"
 
@@ -480,30 +524,25 @@ def abrir_gestion_usuarios(db):
             texto = encabezados.get(c, c)
             if c == col:
                 texto += " ▲" if not reverse else " ▼"
-            tabla.heading(c, text=texto, command=lambda c=c: ordenar_columna(c))
+            tree.heading(c, text=texto, command=lambda c=c: ordenar_columna(c))
 
-    
-    def actualizar_scroll(event=None):
-        canvas.configure(scrollregion=canvas.bbox("all"))
 
-    canvas.bind("<Configure>", actualizar_scroll)
-
-    # Y reemplaza el bucle:
     for col in columnas:
         texto_col = encabezados.get(col, col)
-        tabla.heading(col, text=texto_col, command=lambda c=col: ordenar_columna(c))
-        tabla.column(col, anchor="center", width=110)
+        tree.heading(col, text=texto_col, command=lambda c=col: ordenar_columna(c))
+        tree.column(col, anchor="center", width=110)
 
     seleccionar_todos_var = tk.BooleanVar(value=False)
 
     def toggle_seleccionar_todos():
         if seleccionar_todos_var.get():
-            tabla.selection_set(tabla.get_children())
+            tree.selection_set(tree.get_children())
         else:
-            tabla.selection_remove(tabla.get_children())
+            tree.selection_remove(tree.get_children())
+        actualizar_contador()
 
     def aplicar_filtros():
-        tabla.delete(*tabla.get_children())
+        tree.delete(*tree.get_children())
         criterios = {col: entradas_filtro[col].get().strip().lower() for col in columnas}
         for row in datos_originales:
             visible = True
@@ -513,8 +552,9 @@ def abrir_gestion_usuarios(db):
                     visible = False
                     break
             if visible:
-                tabla.insert("", "end", iid=row["UID"], values=[row.get(c, "") for c in columnas])
+                tree.insert("", "end", iid=row["UID"], values=[row.get(c, "") for c in columnas])
         toggle_seleccionar_todos()
+        ajustar_altura_tree()
 
     def limpiar_filtros():
         for entry in entradas_filtro.values():
@@ -537,30 +577,39 @@ def abrir_gestion_usuarios(db):
             print(f"⚠️ Error al guardar {campo} de {uid}: {e}")
 
     def editar_celda(event):
-        item_id = tabla.focus()
+        item_id = tree.focus()
         if not item_id:
             return
-        col = tabla.identify_column(event.x)
+        col = tree.identify_column(event.x)
         col_index = int(col.replace("#", "")) - 1
         col_nombre = columnas[col_index]
 
         if col_nombre in ["Mensaje", "Seleccionable", "Valor"]:
-            val = tabla.set(item_id, col_nombre)
+            val = tree.set(item_id, col_nombre)
             nuevo = "False" if val == "True" else "True"
-            tabla.set(item_id, col_nombre, nuevo)
+            tree.set(item_id, col_nombre, nuevo)
             guardar_dato(item_id, col_nombre, nuevo)
+            for fila in datos_originales:
+                if fila["UID"] == item_id:
+                    fila[col_nombre] = nuevo
+                    break
+            actualizar_contador()
         else:
-            x, y, width, height = tabla.bbox(item_id, column=col)
-            valor_actual = tabla.set(item_id, col_nombre)
-            entry = tk.Entry(tabla)
+            x, y, width, height = tree.bbox(item_id, column=col)
+            valor_actual = tree.set(item_id, col_nombre)
+            entry = tk.Entry(tree)
             entry.insert(0, valor_actual)
             entry.place(x=x, y=y, width=width, height=height)
             entry.focus()
 
             def guardar_valor(event=None):
                 nuevo_valor = entry.get()
-                tabla.set(item_id, col_nombre, nuevo_valor)
+                tree.set(item_id, col_nombre, nuevo_valor)
                 guardar_dato(item_id, col_nombre, nuevo_valor)
+                for fila in datos_originales:
+                    if fila["UID"] == item_id:
+                        fila[col_nombre] = nuevo_valor
+                        break
                 entry.destroy()
 
             entry.bind("<Return>", guardar_valor)
@@ -569,7 +618,7 @@ def abrir_gestion_usuarios(db):
     def cargar_datos():
         nonlocal datos_originales
         datos_originales = []
-        tabla.delete(*tabla.get_children())
+        tree.delete(*tree.get_children())
 
         t0 = time.time()
         usuarios_docs = list(db.collection("UsuariosAutorizados").stream())
@@ -721,12 +770,15 @@ def abrir_gestion_usuarios(db):
                     batch.commit()
                     batch = db.batch()
             datos_originales.append(fila)
-            tabla.insert("", "end", iid=uid, values=[fila[col] for col in columnas])
+            tree.insert("", "end", iid=uid, values=[fila[col] for col in columnas])
             if idx % 200 == 0:
                 print(f"Procesados {idx}/{total}")
         if ops % 400:
             batch.commit()
         t5 = time.time()
+
+        ajustar_altura_tree()
+        actualizar_contador()
 
         print(
             f"⏱️ t0→t1 Firebase {t1 - t0:.2f}s | t1→t2 TRAB {t2 - t1:.2f}s | "
@@ -735,28 +787,29 @@ def abrir_gestion_usuarios(db):
         )
 
     def toggle_mensaje():
-        seleccion = tabla.selection()
+        seleccion = tree.selection()
         if not seleccion:
             messagebox.showwarning("⚠️ Selección", "Selecciona uno o más usuarios.")
             return
         for uid in seleccion:
-            valor_actual = tabla.set(uid, "Mensaje")
+            valor_actual = tree.set(uid, "Mensaje")
             nuevo_valor = "False" if valor_actual == "True" else "True"
-            tabla.set(uid, "Mensaje", nuevo_valor)
+            tree.set(uid, "Mensaje", nuevo_valor)
             guardar_dato(uid, "Mensaje", nuevo_valor)
             for fila in datos_originales:
                 if fila["UID"] == uid:
                     fila["Mensaje"] = nuevo_valor
                     break
+        actualizar_contador()
 
     def eliminar_usuario():
-        seleccion = tabla.focus()
+        seleccion = tree.focus()
         if not seleccion:
             messagebox.showwarning("⚠️ Selección", "Selecciona un usuario para eliminar.")
             return
 
         uid = seleccion
-        nombre = tabla.set(uid, "Nombre")
+        nombre = tree.set(uid, "Nombre")
 
         if not messagebox.askyesno("Confirmación", f"¿Eliminar al usuario '{nombre}' ({uid})?\nEsta acción no se puede deshacer."):
             return
@@ -780,8 +833,8 @@ def abrir_gestion_usuarios(db):
         except Exception as e:
             messagebox.showerror("❌ Error", f"No se pudo eliminar el usuario:\n{e}")
     def guardar_todo():
-        for item in tabla.get_children():
-            valores = tabla.item(item, "values")
+        for item in tree.get_children():
+            valores = tree.item(item, "values")
             uid = item
             datos = dict(zip(columnas, valores))
 
@@ -818,5 +871,9 @@ def abrir_gestion_usuarios(db):
     tk.Button(frame_botones, text="🗑 Eliminar seleccionado", bg="salmon", command=eliminar_usuario).pack(side="left", padx=10)
     tk.Button(frame_botones, text="💾 Guardar todo", bg="lightgreen", command=guardar_todo).pack(side="left", padx=10)
 
-    tabla.bind("<Double-1>", editar_celda)
+    tree.bind("<Double-1>", editar_celda)
+    tree.bind("<<TreeviewSelect>>", actualizar_contador)
+    tree.bind("<ButtonRelease-1>", lambda e: tree.after(1, actualizar_contador))
+    ventana.bind("<Configure>", ajustar_altura_tree)
+
     cargar_datos()
