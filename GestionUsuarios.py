@@ -458,7 +458,7 @@ def abrir_gestion_usuarios(db):
     frame_status = ttk.Frame(ventana)
     frame_status.grid(row=3, column=0, sticky="ew")
     frame_status.grid_columnconfigure(0, weight=1)
-    contador_var = tk.StringVar(value="Seleccionados con Mensaje=True: 0")
+    contador_var = tk.StringVar(value="Seleccionados para Mensaje: 0")
     ttk.Label(frame_status).grid(row=0, column=0, sticky="ew")
     ttk.Label(frame_status, textvariable=contador_var).grid(row=0, column=1, sticky="e", padx=10, pady=5)
 
