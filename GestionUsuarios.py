@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta
 import datetime
 import re
 from decimal import Decimal
-from typing import Optional, Union, Dict, Iterable
+from typing import Optional, Union, Dict, Iterable, Tuple
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -36,10 +36,15 @@ def normalizar_dni(dni):
 def to_date(x):
     if x is None or x == "":
         return None
-    if isinstance(x, datetime.datetime):
-        return x.date()
+    try:
+        if hasattr(x, "date"):
+            return x.date()
+    except Exception:
+        return None
     if isinstance(x, datetime.date):
         return x
+    if isinstance(x, datetime.datetime):
+        return x.date()
     for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y"):
         try:
             return datetime.datetime.strptime(s(x), fmt).date()
@@ -48,8 +53,12 @@ def to_date(x):
     return None
 
 
-def _date_to_str_ddmmyyyy(d: Optional[date]) -> Optional[str]:
+def fmt_dmy(d):
     return d.strftime("%d-%m-%Y") if isinstance(d, date) else None
+
+
+def _date_to_str_ddmmyyyy(d: Optional[date]) -> Optional[str]:
+    return fmt_dmy(d)
 
 
 def _normalize_optional_str(value: Optional[Union[str, date]]) -> Optional[str]:
@@ -226,6 +235,55 @@ def cargar_datos_ajustados(
     return final
 
 
+def calcular_baja_y_totales(
+    cursor,
+    dni: str
+) -> Tuple[Optional[str], int, float, Optional[date], Optional[date]]:
+    fecha_alta: Optional[date] = None
+    fecha_baja: Optional[date] = None
+    baja_str: Optional[str] = None
+    total_dia = 0
+    total_horas = 0.0
+
+    row = cursor.execute(
+        "SELECT FECHAALTA, FECHABAJA FROM TRABAJADORES WHERE DNI = ?",
+        (dni,)
+    ).fetchone()
+    if row:
+        fecha_alta = to_date(getattr(row, 'FECHAALTA', None))
+        fecha_baja = to_date(getattr(row, 'FECHABAJA', None))
+        baja_str = fmt_dmy(fecha_baja)
+
+    if fecha_baja:
+        return baja_str, 0, 0.0, fecha_alta, fecha_baja
+
+    if not fecha_alta:
+        return baja_str, 0, 0.0, fecha_alta, fecha_baja
+
+    filas = cursor.execute(
+        "SELECT FECHA, HORAS, HORASEXT FROM DATOS_AJUSTADOS WHERE DNI = ? AND FECHA >= ?",
+        (dni, fecha_alta)
+    ).fetchall()
+
+    fechas = set()
+    horas_acum = 0.0
+    for fila in filas:
+        fecha_reg = to_date(getattr(fila, 'FECHA', None))
+        if fecha_reg:
+            fechas.add(fecha_reg)
+        horas_acum += _to_float_safe(getattr(fila, 'HORAS', 0))
+        horas_acum += _to_float_safe(getattr(fila, 'HORASEXT', 0))
+
+    total_dia = len(fechas)
+    total_horas = round(horas_acum, 2)
+
+    if not filas:
+        total_dia = 0
+        total_horas = 0.0
+
+    return baja_str, total_dia, total_horas, fecha_alta, fecha_baja
+
+
 def calcular_totales_y_baja(dni: str) -> Dict[str, Union[int, float, Optional[date], Optional[str]]]:
     resultado: Dict[str, Union[int, float, Optional[date], Optional[str]]] = {
         'total_dia': 0,
@@ -252,36 +310,12 @@ def calcular_totales_y_baja(dni: str) -> Dict[str, Union[int, float, Optional[da
     try:
         conn = pyodbc.connect(str(conn_str))
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT FECHAALTA, FECHABAJA FROM TRABAJADORES WHERE DNI = ?",
-            (dni_normalizado,)
-        )
-        row_trab = cursor.fetchone()
-        fecha_alta = to_date(getattr(row_trab, 'FECHAALTA', None)) if row_trab else None
-        fecha_baja = to_date(getattr(row_trab, 'FECHABAJA', None)) if row_trab else None
-        baja_str = _date_to_str_ddmmyyyy(fecha_baja)
+        baja_str, total_dia, total_horas, fecha_alta, fecha_baja = calcular_baja_y_totales(cursor, dni_normalizado)
+        resultado['baja_str'] = baja_str
+        resultado['total_dia'] = int(total_dia)
+        resultado['total_horas'] = round(float(total_horas), 2)
         resultado['fecha_alta'] = fecha_alta
         resultado['fecha_baja'] = fecha_baja
-        resultado['baja_str'] = baja_str
-
-        if fecha_baja or not fecha_alta:
-            return resultado
-
-        cursor.execute(
-            "SELECT FECHA, HORAS, HORASEXT FROM DATOS_AJUSTADOS WHERE DNI = ? AND FECHA >= ?",
-            (dni_normalizado, fecha_alta)
-        )
-        fechas = set()
-        horas_total = 0.0
-        for row in cursor.fetchall():
-            fecha = to_date(getattr(row, 'FECHA', None))
-            if fecha:
-                fechas.add(fecha)
-            horas = _to_float_safe(getattr(row, 'HORAS', 0))
-            horas_ext = _to_float_safe(getattr(row, 'HORASEXT', 0))
-            horas_total += horas + horas_ext
-        resultado['total_dia'] = len(fechas)
-        resultado['total_horas'] = round(horas_total, 2)
     except Exception as e:
         print(f"⚠️ Error calculando totales para {dni_normalizado}: {e}")
     finally:
