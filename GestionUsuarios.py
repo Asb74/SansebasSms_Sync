@@ -64,10 +64,10 @@ def _chunk_iterable(iterable: Iterable, size: int):
         yield chunk
 
 
-def cargar_trabajadores(dnis: Iterable[str]) -> Dict[str, Dict[str, Optional[str]]]:
+def cargar_trabajadores(dnis: Iterable[str]) -> Dict[str, Dict[str, Optional[Union[str, date]]]]:
     """Lectura única de TRABAJADORES, retornando dict por DNI."""
     ruta = r'X:\ENLACES\Power BI\Campaña\PercecoBi(Campaña).mdb'
-    resultado: Dict[str, Dict[str, Optional[str]]] = {}
+    resultado: Dict[str, Dict[str, Optional[Union[str, date]]]] = {}
     if not os.path.exists(ruta):
         print("❌ Ruta MDB no encontrada.")
         return resultado
@@ -98,7 +98,8 @@ def cargar_trabajadores(dnis: Iterable[str]) -> Dict[str, Dict[str, Optional[str
                     'Nombre': nombre_compuesto,
                     'Alta': _date_to_str_ddmmyyyy(alta_dt),
                     'Baja': _date_to_str_ddmmyyyy(baja_dt),
-                    'Codigo': s_trim(getattr(row, 'CODIGO', None))
+                    'Codigo': s_trim(getattr(row, 'CODIGO', None)),
+                    'AltaDate': alta_dt,
                 }
         cursor.close()
         conn.close()
@@ -107,7 +108,11 @@ def cargar_trabajadores(dnis: Iterable[str]) -> Dict[str, Dict[str, Optional[str
     return resultado
 
 
-def cargar_datos_ajustados(dnis: Iterable[str], min_alta: date) -> Dict[str, Dict[str, Optional[str]]]:
+def cargar_datos_ajustados(
+    dnis: Iterable[str],
+    min_alta: date,
+    altas_por_dni: Optional[Dict[str, date]] = None,
+) -> Dict[str, Dict[str, Union[date, int, float, str, None]]]:
     """Lectura única de DATOS_AJUSTADOS con agregados por DNI."""
     ruta = r'X:\\ENLACES\\Power BI\\Campaña\\PercecoBi(Campaña).mdb'
     datos = defaultdict(lambda: {
@@ -118,6 +123,13 @@ def cargar_datos_ajustados(dnis: Iterable[str], min_alta: date) -> Dict[str, Dic
     })
     if not os.path.exists(ruta):
         return datos
+
+    altas_filtradas: Dict[str, date] = {}
+    if altas_por_dni:
+        for dni_key, alta_valor in altas_por_dni.items():
+            alta_dt = to_date(alta_valor)
+            if alta_dt:
+                altas_filtradas[normalizar_dni(dni_key)] = alta_dt
 
     conn_str = (
         r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};'
@@ -139,6 +151,9 @@ def cargar_datos_ajustados(dnis: Iterable[str], min_alta: date) -> Dict[str, Dic
                 if not dni:
                     continue
                 fecha = to_date(getattr(row, 'FECHA', None))
+                alta_referencia = altas_filtradas.get(dni)
+                if alta_referencia and fecha and fecha < alta_referencia:
+                    continue
                 horas = float(s(getattr(row, 'HORAS', 0)) or 0) + float(s(getattr(row, 'HORASEXT', 0)) or 0)
                 categoria = s_trim(getattr(row, 'CATEGORIA', None))
                 info = datos[dni]
@@ -373,8 +388,15 @@ def abrir_gestion_usuarios(db):
                     min_alta = alta
 
         trab_by_dni = cargar_trabajadores(dnis)
+        altas_por_dni: Dict[str, date] = {}
+        for dni_trab, info_trab in trab_by_dni.items():
+            alta_dt = info_trab.get('AltaDate') if isinstance(info_trab, dict) else None
+            if isinstance(alta_dt, date):
+                altas_por_dni[dni_trab] = alta_dt
+                if alta_dt < min_alta:
+                    min_alta = alta_dt
         t2 = time.time()
-        ajust_by_dni = cargar_datos_ajustados(dnis, min_alta)
+        ajust_by_dni = cargar_datos_ajustados(dnis, min_alta, altas_por_dni)
         t3 = time.time()
 
         total = len(usuarios_docs)
