@@ -110,6 +110,42 @@ def enviar_push_resultado(
     send_push_to_token(SERVICE_ACCOUNT_JSON, PROJECT_ID, token, title, body)
 
 
+class ToolTip:
+    def __init__(self, widget: tk.Widget) -> None:
+        self.widget = widget
+        self.tipwindow: Optional[tk.Toplevel] = None
+
+    def show(self, text: str, x: int, y: int) -> None:
+        text = (text or "").strip()
+        if not text:
+            self.hide()
+            return
+
+        self.hide()
+
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(
+            f"+{self.widget.winfo_rootx() + x + 20}+{self.widget.winfo_rooty() + y + 20}"
+        )
+
+        label = tk.Label(
+            tw,
+            text=text,
+            justify="left",
+            background="#ffffe0",
+            relief="solid",
+            borderwidth=1,
+            wraplength=400,
+        )
+        label.pack(ipadx=4, ipady=2)
+
+    def hide(self) -> None:
+        if self.tipwindow is not None:
+            self.tipwindow.destroy()
+            self.tipwindow = None
+
+
 class GestionPeticionesUI:
     def __init__(self, window: tk.Toplevel, db: firestore.Client, on_close) -> None:
         self.window = window
@@ -118,6 +154,7 @@ class GestionPeticionesUI:
         self.data_rows: List[Dict[str, Any]] = []
         self.tree_items_info: Dict[str, Dict[str, Any]] = {}
         self.editor_state: Dict[str, Any] = {"widget": None, "item": None, "old": None}
+        self._tooltip_state: Dict[str, Optional[str]] = {"item": None, "text": None}
 
         self._build_ui()
         self.actualizar()
@@ -174,7 +211,7 @@ class GestionPeticionesUI:
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
 
-        columnas = ("Nombre", "Fecha", "CreadoEn", "Admitido")
+        columnas = ("Nombre", "Fecha", "CreadoEn", "Motivo", "Admitido")
         self.tree = ttk.Treeview(
             tree_frame,
             columns=columnas,
@@ -193,14 +230,21 @@ class GestionPeticionesUI:
         self.tree.heading("Nombre", text="Nombre")
         self.tree.heading("Fecha", text="Fecha")
         self.tree.heading("CreadoEn", text="CreadoEn")
+        self.tree.heading("Motivo", text="Motivo")
         self.tree.heading("Admitido", text="Admitido")
 
         self.tree.column("Nombre", width=220, anchor="w")
         self.tree.column("Fecha", width=140, anchor="center")
         self.tree.column("CreadoEn", width=200, anchor="center")
+        self.tree.column("Motivo", width=320, anchor="w", stretch=True)
         self.tree.column("Admitido", width=120, anchor="center")
 
+        self.tooltip = ToolTip(self.tree)
+        self._clear_tooltip()
+
         self.tree.bind("<Double-1>", self._iniciar_edicion)
+        self.tree.bind("<Motion>", self._on_tree_motion)
+        self.tree.bind("<Leave>", lambda _e: self._clear_tooltip())
 
         bottom_bar = ttk.Frame(self.window, padding=10)
         bottom_bar.grid(row=3, column=0, sticky="ew")
@@ -219,22 +263,30 @@ class GestionPeticionesUI:
             widget.destroy()
         self.editor_state = {"widget": None, "item": None, "old": None}
 
+        self._clear_tooltip()
+
+    def _clear_tooltip(self) -> None:
+        if hasattr(self, "tooltip"):
+            self.tooltip.hide()
+        self._tooltip_state = {"item": None, "text": None}
+
     def _populate_tree(self, rows: List[Dict[str, Any]]) -> None:
         self._cerrar_editor()
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.tree_items_info.clear()
 
+        self._clear_tooltip()
+
         for row in rows:
             nombre = row.get("Nombre") or "Falta"
             fecha_str = _fmt_fecha(row.get("Fecha"))
             creado_str = _fmt_fechahora(row.get("CreadoEn"))
-            admitido_val = row.get("Admitido") or ""
-            item_id = self.tree.insert(
-                "",
-                "end",
-                values=(nombre, fecha_str, creado_str, admitido_val),
-            )
+            motivo_val = row.get("Motivo") or ""
+            admitido_display = row.get("Admitido") or "Pendiente"
+            vals = (nombre, fecha_str, creado_str, motivo_val, admitido_display)
+            iid = row.get("doc_id") or f"row_{len(self.tree_items_info)}"
+            item_id = self.tree.insert("", "end", iid=iid, values=vals)
             self.tree_items_info[item_id] = row
 
     def actualizar(self) -> None:
@@ -265,10 +317,11 @@ class GestionPeticionesUI:
                 "doc_id": doc.id,
                 "uid": uid,
                 "fcmToken": token,
-                "Nombre": nombre,
+                "Nombre": nombre or "Falta",
                 "Fecha": data.get("Fecha"),
                 "CreadoEn": data.get("creadoEn"),
-                "Admitido": data.get("Admitido"),
+                "Admitido": data.get("Admitido") or "",
+                "Motivo": (data.get("Motivo") or "").strip(),
             }
             rows.append(row)
 
@@ -332,7 +385,7 @@ class GestionPeticionesUI:
         )
         if not path:
             return
-        cols = ["Nombre", "Fecha", "CreadoEn", "Admitido"]
+        cols = ["Nombre", "Fecha", "CreadoEn", "Motivo", "Admitido"]
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
             writer.writerow(cols)
@@ -340,6 +393,36 @@ class GestionPeticionesUI:
                 values = list(self.tree.item(item, "values"))
                 writer.writerow(values)
         messagebox.showinfo("Exportar CSV", "Exportación completada.")
+
+    def _on_tree_motion(self, event) -> None:
+        region = self.tree.identify("region", event.x, event.y)
+        if region != "cell":
+            self._clear_tooltip()
+            return
+
+        column = self.tree.identify_column(event.x)
+        if column != "#4":
+            self._clear_tooltip()
+            return
+
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            self._clear_tooltip()
+            return
+
+        text = (self.tree.set(item_id, "Motivo") or "").strip()
+        if not text or len(text) <= 48:
+            self._clear_tooltip()
+            return
+
+        if (
+            self._tooltip_state.get("item") == item_id
+            and self._tooltip_state.get("text") == text
+        ):
+            return
+
+        self._tooltip_state = {"item": item_id, "text": text}
+        self.tooltip.show(text, event.x, event.y)
 
     def _guardar_cambio(self, nuevo_valor: str) -> None:
         widget = self.editor_state.get("widget")
@@ -386,7 +469,7 @@ class GestionPeticionesUI:
         if region != "cell":
             return
         column = self.tree.identify_column(event.x)
-        if column != "#4":
+        if column != "#5":
             return
         item_id = self.tree.identify_row(event.y)
         if not item_id:
@@ -397,6 +480,8 @@ class GestionPeticionesUI:
             return
 
         self._cerrar_editor()
+
+        self._clear_tooltip()
 
         x, y, width, height = bbox
         current_value = self.tree.set(item_id, "Admitido")
