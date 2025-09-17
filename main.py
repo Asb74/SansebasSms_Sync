@@ -94,6 +94,15 @@ except Exception as e:
     print(f"❌ Error al inicializar Firebase: {e}")
     exit()
 
+
+def abrir_gestion_peticiones(db):
+    from GestionPeticiones import abrir_gestion_peticiones as abrir
+
+    sa_path = credenciales_dinamicas.get("ruta")
+    project_id = project_info.get("id")
+    abrir(db, sa_path, project_id)
+
+
 def obtener_token_oauth():
     try:
         creds = service_account.Credentials.from_service_account_file(
@@ -399,6 +408,7 @@ btn_crear_auto.pack_forget()  # Botón ocultado a petición: "Crear mensajes aut
 tk.Button(frame, text="📲 Enviar notificaciones push", command=enviar_notificaciones_push, height=2, width=40, bg="lightgreen").pack(pady=5)
 tk.Button(frame, text="👥 Gestionar Usuarios", command=lambda: abrir_gestion_usuarios(db), height=2, width=40, bg="lightyellow").pack(pady=5)
 tk.Button(frame, text="📜 Gestionar Mensajes", command=lambda: abrir_gestion_mensajes(db), height=2, width=40).pack(pady=5)
+tk.Button(frame, text="Peticiones de Días Libres", command=lambda: abrir_gestion_peticiones(db), height=2, width=40).pack(pady=5)
 tk.Button(frame, text="🆕 Generar mensajes", command=lambda: abrir_generar_mensajes(db), height=2, width=40).pack(pady=5)
 
 
