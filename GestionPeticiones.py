@@ -1,6 +1,6 @@
 import csv
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -40,6 +40,15 @@ def _fmt_fecha(dt):
 def _fmt_fechahora(dt):
     local_dt = _to_local(dt)
     return local_dt.strftime("%d-%m-%Y %H:%M") if local_dt else ""
+
+
+def normalizar_estado(v: str | None) -> str:
+    s = (v or "").strip().lower()
+    if s == "ok":
+        return "Ok"
+    if s == "denegado":
+        return "Denegado"
+    return "Pendiente"
 
 
 def _parse_fecha_text(s: str):
@@ -190,7 +199,7 @@ class GestionPeticionesUI:
         ttk.Label(frame_filtros, text="Estado").grid(row=0, column=4, sticky="w", padx=(0, 4))
         self.cmb_estado = ttk.Combobox(
             frame_filtros,
-            values=["Todos", "Ok", "Denegado", "Vacío"],
+            values=("Todos", "Ok", "Denegado", "Pendiente"),
             state="readonly",
             width=12,
         )
@@ -283,8 +292,8 @@ class GestionPeticionesUI:
             fecha_str = _fmt_fecha(row.get("Fecha"))
             creado_str = _fmt_fechahora(row.get("CreadoEn"))
             motivo_val = row.get("Motivo") or ""
-            admitido_display = row.get("Admitido") or "Pendiente"
-            vals = (nombre, fecha_str, creado_str, motivo_val, admitido_display)
+            estado = normalizar_estado(row.get("Admitido"))
+            vals = (nombre, fecha_str, creado_str, motivo_val, estado)
             iid = row.get("doc_id") or f"row_{len(self.tree_items_info)}"
             item_id = self.tree.insert("", "end", iid=iid, values=vals)
             self.tree_items_info[item_id] = row
@@ -336,6 +345,10 @@ class GestionPeticionesUI:
         fecha_dt = _parse_fecha_text(fecha_text)
         estado_filter = self.cmb_estado.get()
 
+        def pasa_estado(fila: Dict[str, Any]) -> bool:
+            estado = normalizar_estado(fila.get("Admitido"))
+            return (estado_filter == "Todos") or (estado == estado_filter)
+
         filtrados: List[Dict[str, Any]] = []
         for row in self.data_rows:
             nombre = (row.get("Nombre") or "").lower()
@@ -347,13 +360,8 @@ class GestionPeticionesUI:
                 if not row_fecha or row_fecha.date() != fecha_dt.date():
                     continue
 
-            admitido_val = row.get("Admitido")
-            if estado_filter == "Vacío":
-                if admitido_val not in (None, ""):
-                    continue
-            elif estado_filter != "Todos":
-                if (admitido_val or "") != estado_filter:
-                    continue
+            if not pasa_estado(row):
+                continue
 
             filtrados.append(row)
 
@@ -461,7 +469,7 @@ class GestionPeticionesUI:
             return
 
         row_info["Admitido"] = nuevo_valor
-        self.tree.set(item_id, "Admitido", nuevo_valor)
+        self.tree.set(item_id, "Admitido", normalizar_estado(nuevo_valor))
         self.aplicar_filtros()
 
     def _iniciar_edicion(self, event) -> None:
