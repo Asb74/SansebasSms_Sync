@@ -5,45 +5,50 @@ import pyodbc
 import os
 from firebase_admin import auth, firestore
 import datetime as dt
-from datetime import datetime, date, timedelta, timezone
-import datetime
+from datetime import date, timedelta, timezone
 import re
 from decimal import Decimal
 from typing import Optional, Union, Dict, Iterable, Tuple, List
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import time
-import math
 
 
 DATE_RE = re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})")
 
 
 def start_of_day_local_to_utc(d: date):
-    local = datetime(d.year, d.month, d.day)
+    local_tz = dt.datetime.now().astimezone().tzinfo
+    local = dt.datetime(d.year, d.month, d.day, tzinfo=local_tz)
     return local.astimezone(timezone.utc)
 
 
 def end_of_day_local_to_utc(d: date):
-    local = datetime(d.year, d.month, d.day, 23, 59, 59, 999000)
+    local_tz = dt.datetime.now().astimezone().tzinfo
+    local = dt.datetime(d.year, d.month, d.day, 23, 59, 59, 999000, tzinfo=local_tz)
     return local.astimezone(timezone.utc)
 
 
-def _timestamp_to_local_date(value) -> Optional[date]:
+def _timestamp_to_local_date(value):
     if value is None:
         return None
+    # Firestore Timestamp → datetime
     if hasattr(value, "to_datetime"):
         try:
             value = value.to_datetime()
         except Exception:
             return None
-    if isinstance(value, datetime):
+    if isinstance(value, dt.datetime):
         if value.tzinfo is None:
-            return value.date()
+            value = value.replace(tzinfo=dt.datetime.now().astimezone().tzinfo)
         return value.astimezone().date()
     if isinstance(value, date):
         return value
     return None
+
+
+def _is_ok(v: str | None) -> bool:
+    return (v or "").strip().lower() == "ok"
 
 
 def parse_baja_texto_largo(raw: str) -> date | None:
@@ -70,7 +75,7 @@ def parse_access_date(raw) -> date | None:
     """Convierte valores Access (datetime, str, número OLE) a date."""
     if raw is None:
         return None
-    if isinstance(raw, datetime.datetime):
+    if isinstance(raw, dt.datetime):
         return raw.date()
     if isinstance(raw, date):
         return raw
@@ -84,7 +89,7 @@ def parse_access_date(raw) -> date | None:
     if isinstance(raw, str):
         for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y"):
             try:
-                return datetime.datetime.strptime(raw.strip(), fmt).date()
+                return dt.datetime.strptime(raw.strip(), fmt).date()
             except Exception:
                 pass
         return parse_baja_texto_largo(raw)
@@ -142,13 +147,13 @@ def to_date(x):
             return x.date()
     except Exception:
         return None
-    if isinstance(x, datetime.date):
+    if isinstance(x, dt.date):
         return x
-    if isinstance(x, datetime.datetime):
+    if isinstance(x, dt.datetime):
         return x.date()
     for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y"):
         try:
-            return datetime.datetime.strptime(s(x), fmt).date()
+            return dt.datetime.strptime(s(x), fmt).date()
         except ValueError:
             pass
     return None
@@ -579,12 +584,12 @@ def abrir_gestion_usuarios(db):
     nombre_col_index = COL_INDEX.get("Nombre", 1)
     nombre_col_id = f"#{nombre_col_index + 1}"
 
-    def formatear_nombre(uid: str, nombre: Optional[str]) -> str:
+    def formatear_nombre(uid: str, nombre: str | None) -> str:
         base = (nombre or "Falta")
         return ("🔴 " if uid in upcoming_by_uid else "") + base
 
-    def row_to_values(row: Dict[str, str]) -> List[str]:
-        valores: List[str] = []
+    def row_to_values(row: dict) -> list[str]:
+        valores: list[str] = []
         for col in columnas:
             valor = row.get(col, "")
             if col == "Nombre":
@@ -683,11 +688,10 @@ def abrir_gestion_usuarios(db):
     def ajustar_altura_tree(*_):
         tree.update_idletasks()
         n_rows = len(tree.get_children(""))
-        H = table_frame.winfo_height() or tree.winfo_height()
+        H = tabla_frame.winfo_height() or tree.winfo_height()
         margen = 40
-        rh = max(_row_height(), 1)
-        disponible = max(0, H - margen)
-        max_rows_fit = max(3, math.floor(disponible / rh))
+        rh = _row_height()
+        max_rows_fit = max(3, (H - margen) // rh)
         altura = min(n_rows, max_rows_fit)
         tree.configure(height=altura)
 
@@ -700,7 +704,7 @@ def abrir_gestion_usuarios(db):
                 return float(valor)
             except:
                 try:
-                    return datetime.strptime(valor, "%d-%m-%Y")
+                    return dt.datetime.strptime(valor, "%d-%m-%Y")
                 except:
                     return valor.lower()
 
@@ -830,7 +834,6 @@ def abrir_gestion_usuarios(db):
         nonlocal datos_originales
         datos_originales = []
         rows_by_iid.clear()
-        upcoming_by_uid.clear()
         _hide_cal_popup()
         tree.delete(*tree.get_children())
 
@@ -840,29 +843,30 @@ def abrir_gestion_usuarios(db):
 
         hoy = dt.datetime.now().date()
         rango_fin = hoy + timedelta(days=5)
-        try:
-            peticiones_cursor = list(
-                db.collection("Peticiones")
-                .where("Admitido", "==", "Ok")
-                .where("Fecha", ">=", start_of_day_local_to_utc(hoy))
-                .where("Fecha", "<=", end_of_day_local_to_utc(rango_fin))
-                .stream()
-            )
-        except Exception as exc:
-            peticiones_cursor = []
-            print(f"⚠️ No se pudieron obtener las peticiones próximas: {exc}")
+
+        peticiones_cursor = list(
+            db.collection("Peticiones")
+            .where("Fecha", ">=", start_of_day_local_to_utc(hoy))
+            .where("Fecha", "<=", end_of_day_local_to_utc(rango_fin))
+            .stream()
+        )
+
+        upcoming_by_uid.clear()
         for pet_doc in peticiones_cursor:
-            data_pet = pet_doc.to_dict() or {}
-            uid_pet = data_pet.get("uid") or data_pet.get("Uid")
-            if not uid_pet:
+            d = pet_doc.to_dict() or {}
+            if not _is_ok(d.get("Admitido")):
                 continue
-            fecha_pet = _timestamp_to_local_date(data_pet.get("Fecha"))
-            if not fecha_pet:
-                continue
-            if hoy <= fecha_pet <= rango_fin:
-                upcoming_by_uid[uid_pet].append(fecha_pet)
+            uid_pet = d.get("uid") or d.get("Uid")
+            f = _timestamp_to_local_date(d.get("Fecha"))
+            if uid_pet and f and hoy <= f <= rango_fin:
+                upcoming_by_uid[uid_pet].append(f)
+
         for fechas in upcoming_by_uid.values():
             fechas.sort()
+
+        print(
+            f"🔎 Peticiones OK próximos 5 días: {sum(len(v) for v in upcoming_by_uid.values())} en {len(upcoming_by_uid)} usuarios"
+        )
 
         dnis = set()
         min_alta = hoy - timedelta(days=365)
