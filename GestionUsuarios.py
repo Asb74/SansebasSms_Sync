@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import pyodbc
 import os
-from firebase_admin import auth
+from firebase_admin import auth, firestore
 import datetime as dt
 from datetime import datetime, date, timedelta
 import datetime
@@ -80,6 +80,27 @@ def safe_re_sub(pattern, repl, value):
 
 def normalizar_dni(dni):
     return safe_re_sub(r"[^0-9A-Za-z]", "", dni).upper()
+
+
+def map_genero(sexo_raw: str | None) -> str:
+    s_val = (sexo_raw or "").strip().upper()
+    if s_val == "H":
+        return "Hombre"
+    if s_val == "M":
+        return "Mujer"
+    return "Otro"
+
+
+def _normalizar_genero_existente(valor: Optional[str]) -> Optional[str]:
+    texto = s_trim(valor)
+    if not texto:
+        return None
+    minus = texto.lower()
+    if minus in ("h", "hombre"):
+        return "Hombre"
+    if minus in ("m", "mujer"):
+        return "Mujer"
+    return texto
 
 
 def to_date(x):
@@ -182,7 +203,7 @@ def cargar_trabajadores(dnis: Iterable[str]) -> Dict[str, Dict[str, Optional[Uni
         r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};'
         f'DBQ={ruta};'
     )
-    columnas = "DNI, CODIGO, FECHAALTA, FECHABAJA, APELLIDOS, APELLIDOS2, NOMBRE"
+    columnas = "DNI, CODIGO, FECHAALTA, FECHABAJA, SEXO, APELLIDOS, APELLIDOS2, NOMBRE"
     try:
         conn = pyodbc.connect(str(conn_str))
         cursor = conn.cursor()
@@ -207,6 +228,7 @@ def cargar_trabajadores(dnis: Iterable[str]) -> Dict[str, Dict[str, Optional[Uni
                     'Codigo': s_trim(getattr(row, 'CODIGO', None)),
                     'AltaDate': alta_dt,
                     'BajaDate': baja_dt,
+                    'Genero': map_genero(getattr(row, 'SEXO', None)),
                 }
         cursor.close()
         conn.close()
@@ -300,7 +322,7 @@ def calcular_baja_y_totales(
         return baja_str, 0, 0.0, fecha_alta, fecha_baja
 
     row = cursor.execute(
-        "SELECT FECHAALTA, FECHABAJA FROM TRABAJADORES WHERE Trim(UCase(DNI)) = ?",
+        "SELECT FECHAALTA, FECHABAJA, SEXO FROM TRABAJADORES WHERE Trim(UCase(DNI)) = ?",
         (dni_param,)
     ).fetchone()
 
@@ -380,6 +402,64 @@ def calcular_totales_y_baja(dni: str) -> Dict[str, Union[int, float, Optional[da
             conn.close()
     return resultado
 
+
+def migrar_cultivo_a_genero(db, cursor) -> None:
+    """Migra documentos antiguos usando el campo Cultivo hacia Género."""
+    if db is None:
+        print("⚠️ Base de datos Firestore no disponible para migrar Género.")
+        return
+
+    try:
+        usuarios_docs = list(db.collection("UsuariosAutorizados").stream())
+    except Exception as e:
+        print(f"❌ No se pudieron obtener usuarios para migrar Género: {e}")
+        return
+
+    total = len(usuarios_docs)
+    print(f"🔁 Iniciando migración de Género para {total} usuarios...")
+
+    for idx, doc in enumerate(usuarios_docs, start=1):
+        data = doc.to_dict() or {}
+        uid = doc.id
+        dni_raw = data.get("Dni")
+        genero_valor: Optional[str] = None
+
+        dni_param = (dni_raw or "").strip().upper()
+        if cursor and dni_param:
+            try:
+                row = cursor.execute(
+                    "SELECT FECHAALTA, FECHABAJA, SEXO FROM TRABAJADORES WHERE Trim(UCase(DNI)) = ?",
+                    (dni_param,)
+                ).fetchone()
+                sexo = getattr(row, "SEXO", None) if row else None
+                genero_valor = map_genero(sexo)
+            except Exception as exc:
+                print(f"⚠️ No se pudo obtener SEXO para {dni_param}: {exc}")
+
+        if not genero_valor:
+            cultivo = data.get("Cultivo")
+            genero_valor = _normalizar_genero_existente(cultivo)
+            if not genero_valor:
+                genero_existente = _normalizar_genero_existente(data.get("Genero"))
+                genero_valor = genero_existente or "Otro"
+
+        try:
+            doc_ref = db.collection("UsuariosAutorizados").document(uid)
+            doc_ref.update({"Genero": genero_valor})
+            if "Cultivo" in data:
+                try:
+                    doc_ref.update({"Cultivo": firestore.DELETE_FIELD})
+                except Exception as exc:
+                    print(f"⚠️ No se pudo eliminar Cultivo de {uid}: {exc}")
+        except Exception as exc:
+            print(f"❌ Error migrando Género de {uid}: {exc}")
+
+        if idx % 100 == 0:
+            print(f"   ↪ Migrados {idx}/{total}")
+
+    print("✅ Migración de Género finalizada.")
+
+
 def abrir_gestion_usuarios(db):
     """Abre la ventana de gestión de usuarios evitando duplicados."""
     global ventana_usuarios
@@ -400,12 +480,12 @@ def abrir_gestion_usuarios(db):
 
     ventana.protocol("WM_DELETE_WINDOW", on_close)
 
-    columnas = ["Dni", "Nombre", "Telefono", "correo", "Puesto", "Turno", "Cultivo",
+    columnas = ["Dni", "Nombre", "Telefono", "correo", "Puesto", "Turno", "Genero",
                 "Mensaje", "Seleccionable", "Valor", "Alta", "UltimoDia", "TotalDia", "TotalHoras", "Baja", "Codigo"]
 
     encabezados = {
         "Dni": "Dni", "Nombre": "Nombre", "Telefono": "Teléfono", "correo": "Correo",
-        "Puesto": "Puesto", "Turno": "Turno", "Cultivo": "Cultivo",
+        "Puesto": "Puesto", "Turno": "Turno", "Genero": "Género",
         "Mensaje": "Mensaje", "Seleccionable": "Seleccionable", "Valor": "Valor",
         "Alta": "Alta", "UltimoDia": "Último Día", "TotalDia": "Total Día",
         "TotalHoras": "Total Horas", "Baja": "Baja", "Codigo": "Código"
@@ -532,6 +612,10 @@ def abrir_gestion_usuarios(db):
         tree.heading(col, text=texto_col, command=lambda c=col: ordenar_columna(c))
         tree.column(col, anchor="center", width=110)
 
+    if "Genero" in columnas:
+        tree.heading("Genero", text="Género", command=lambda c="Genero": ordenar_columna(c))
+        tree.column("Genero", width=90, anchor="center")
+
     seleccionar_todos_var = tk.BooleanVar(value=False)
 
     def toggle_seleccionar_todos():
@@ -570,7 +654,7 @@ def abrir_gestion_usuarios(db):
                 valor = int(valor)
             elif campo in ["TotalHoras"]:
                 valor = float(valor)
-            elif campo in ["Alta", "UltimoDia", "Baja", "Codigo"]:
+            elif campo in ["Alta", "UltimoDia", "Baja", "Codigo", "Genero"]:
                 valor = s_trim(valor)
             doc_ref.update({campo: valor})
         except Exception as e:
@@ -658,6 +742,7 @@ def abrir_gestion_usuarios(db):
                 dni_original = data.get("Dni")
                 dni_normalizado = normalizar_dni(dni_original)
                 data["Dni"] = dni_normalizado or "Falta"
+                genero_final = _normalizar_genero_existente(data.get("Genero"))
 
                 total_dia_actual = _to_int_safe(data.get("TotalDia"))
                 total_horas_actual = float(round(_to_float_safe(data.get("TotalHoras")), 2))
@@ -671,6 +756,9 @@ def abrir_gestion_usuarios(db):
                             if val and val != data.get(campo):
                                 actualiza[campo] = val
                                 data[campo] = val
+                        genero_trab = trab.get("Genero")
+                        if genero_trab:
+                            genero_final = genero_trab
                     else:
                         actualiza["Mensaje"] = False
                         actualiza["Seleccionable"] = False
@@ -732,12 +820,16 @@ def abrir_gestion_usuarios(db):
                     data["Mensaje"] = False
                     data["Seleccionable"] = False
 
+                if not genero_final:
+                    genero_final = "Otro"
+                actualiza["Genero"] = genero_final
+                data["Genero"] = genero_final
+
                 data["Nombre"] = data.get("Nombre", "Falta")
                 data["Telefono"] = data.get("Telefono", "")
                 data["correo"] = data.get("correo", "")
                 data["Puesto"] = data.get("Puesto", "Falta")
                 data["Turno"] = str(data.get("Turno", "1"))
-                data["Cultivo"] = data.get("Cultivo", "Falta")
                 data["Mensaje"] = str(data.get("Mensaje", False))
                 data["Seleccionable"] = str(data.get("Seleccionable", True))
                 data["Valor"] = str(data.get("Valor", False))
@@ -854,7 +946,7 @@ def abrir_gestion_usuarios(db):
                 except:
                     datos[campo] = 0.0
 
-            for campo in ["Alta", "UltimoDia", "Baja", "Codigo"]:
+            for campo in ["Alta", "UltimoDia", "Baja", "Codigo", "Genero"]:
                 datos[campo] = s_trim(datos.get(campo))
 
             try:
