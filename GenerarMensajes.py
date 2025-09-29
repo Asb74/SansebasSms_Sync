@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-from datetime import datetime
+import datetime as dt
+from datetime import datetime, date, timezone
 
 try:
     from tkcalendar import DateEntry
@@ -8,6 +9,136 @@ except Exception:  # pragma: no cover - tkcalendar opcional
     DateEntry = None  # type: ignore
 
 from GestionUsuarios import on_mensajes_generados
+
+
+def start_of_day_local_to_utc(d: date):
+    local_tz = dt.datetime.now().astimezone().tzinfo
+    local = dt.datetime(d.year, d.month, d.day, tzinfo=local_tz)
+    return local.astimezone(timezone.utc)
+
+
+def end_of_day_local_to_utc(d: date):
+    local_tz = dt.datetime.now().astimezone().tzinfo
+    local = dt.datetime(d.year, d.month, d.day, 23, 59, 59, 999000, tzinfo=local_tz)
+    return local.astimezone(timezone.utc)
+
+
+def _timestamp_to_local_date(value):
+    if value is None:
+        return None
+    if hasattr(value, "to_datetime"):
+        try:
+            value = value.to_datetime()
+        except Exception:
+            return None
+    if isinstance(value, dt.datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=dt.datetime.now().astimezone().tzinfo)
+        return value.astimezone().date()
+    if isinstance(value, date):
+        return value
+    return None
+
+
+def _is_ok(v: str | None) -> bool:
+    return (v or "").strip().lower() == "ok"
+
+
+def _resolver_nombres(db, uids: list[str]) -> dict[str, str]:
+    """Devuelve {uid: Nombre} usando UsuariosAutorizados."""
+    out: dict[str, str] = {}
+    for uid in uids:
+        try:
+            doc = db.collection("UsuariosAutorizados").document(uid).get()
+            data = doc.to_dict() or {}
+            out[uid] = data.get("Nombre") or uid
+        except Exception:
+            out[uid] = uid
+    return out
+
+
+def _prechequeo_dias_libres(db, fecha_msg: date, uids_sel: list[str]) -> tuple[set[str], list[str]]:
+    if not uids_sel:
+        return set(), []
+
+    inicio = start_of_day_local_to_utc(fecha_msg)
+    fin = end_of_day_local_to_utc(fecha_msg)
+
+    try:
+        peticiones = list(
+            db.collection("Peticiones")
+            .where("Fecha", ">=", inicio)
+            .where("Fecha", "<=", fin)
+            .stream()
+        )
+    except Exception:
+        peticiones = []
+
+    uids_sel_set = set(uids_sel)
+    conflict_uids: set[str] = set()
+
+    for peticion in peticiones:
+        data = peticion.to_dict() or {}
+        if not _is_ok(data.get("Admitido")):
+            continue
+        uid = data.get("uid") or data.get("Uid")
+        fecha = _timestamp_to_local_date(data.get("Fecha"))
+        if not uid or uid not in uids_sel_set or fecha != fecha_msg:
+            continue
+        conflict_uids.add(uid)
+
+    nombres_map = _resolver_nombres(db, list(conflict_uids))
+    nombres_conf = sorted(nombres_map.get(uid, uid) for uid in conflict_uids)
+    return conflict_uids, nombres_conf
+
+
+def _dialogo_conflictos(root, fecha_msg: date, nombres_conf: list[str]) -> bool:
+    if not nombres_conf:
+        return True
+
+    top = tk.Toplevel(root)
+    top.title("Días libres detectados")
+    top.transient(root)
+    top.grab_set()
+    top.geometry("+{}+{}".format(root.winfo_rootx() + 60, root.winfo_rooty() + 60))
+
+    ttk.Label(
+        top,
+        text=(
+            f"Para la fecha {fecha_msg.strftime('%d-%m-%Y')} se han encontrado usuarios "
+            "con día libre concedido:"
+        ),
+    ).pack(padx=12, pady=(12, 6), anchor="w")
+
+    frame = ttk.Frame(top)
+    frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+    lst = tk.Listbox(frame, height=min(10, max(3, len(nombres_conf))))
+    for nombre in nombres_conf:
+        lst.insert("end", nombre)
+    lst.pack(fill="both", expand=True)
+
+    respuesta = {"send": False}
+
+    def _cancelar():
+        respuesta["send"] = False
+        top.destroy()
+
+    def _enviar():
+        respuesta["send"] = True
+        top.destroy()
+
+    botones = ttk.Frame(top)
+    botones.pack(fill="x", padx=12, pady=(0, 12))
+    ttk.Button(botones, text="Cancelar", command=_cancelar).pack(side="left")
+    ttk.Button(
+        botones,
+        text="Enviar mensajes (excluyendo listados)",
+        command=_enviar,
+    ).pack(side="right")
+
+    top.wait_window()
+    return respuesta["send"]
 
 ventana_generar = None
 
@@ -146,14 +277,48 @@ def abrir_generar_mensajes(db, preset=None):
 
         btn_guardar.config(state="disabled")
         ventana_generar.update_idletasks()
-        uids_afectados = []
+        uids_afectados: list[str] = []
 
         try:
-            usuarios = db.collection("UsuariosAutorizados").where("Mensaje", "==", True).stream()
-            count = 0
-            for doc_user in usuarios:
+            usuarios_stream = db.collection("UsuariosAutorizados").where("Mensaje", "==", True).stream()
+            usuarios_list = []
+            uids_seleccionados: list[str] = []
+            for doc_user in usuarios_stream:
                 data_u = doc_user.to_dict() or {}
                 uid = doc_user.id
+                usuarios_list.append((uid, data_u))
+                uids_seleccionados.append(uid)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudieron obtener los usuarios seleccionados: {e}")
+            btn_guardar.config(state="normal")
+            return
+
+        conflictos, nombres_conf = _prechequeo_dias_libres(db, dia, uids_seleccionados)
+
+        if conflictos:
+            seguir = _dialogo_conflictos(ventana_generar, dia, nombres_conf)
+            if not seguir:
+                btn_guardar.config(state="normal")
+                return
+            uids_permitidos = [uid for uid in uids_seleccionados if uid not in conflictos]
+            if not uids_permitidos:
+                messagebox.showinfo("Sin envíos", "Todos los usuarios seleccionados tienen día libre para esa fecha.")
+                btn_guardar.config(state="normal")
+                return
+        else:
+            uids_permitidos = uids_seleccionados
+
+        uids_permitidos_set = set(uids_permitidos)
+        usuarios_filtrados = [item for item in usuarios_list if item[0] in uids_permitidos_set]
+
+        if not usuarios_filtrados:
+            messagebox.showinfo("Sin usuarios", "No hay usuarios seleccionados para enviar mensajes.")
+            btn_guardar.config(state="normal")
+            return
+
+        try:
+            count = 0
+            for uid, data_u in usuarios_filtrados:
                 telefono = data_u.get("Telefono") or data_u.get("telefono") or ""
                 doc_id = f"{uid}_{fechaHora.strftime('%Y%m%d%H%M')}"
                 payload = {
