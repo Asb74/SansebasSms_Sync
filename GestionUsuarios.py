@@ -1,14 +1,15 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
+from tkcalendar import Calendar
 import pyodbc
 import os
 from firebase_admin import auth, firestore
 import datetime as dt
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import datetime
 import re
 from decimal import Decimal
-from typing import Optional, Union, Dict, Iterable, Tuple
+from typing import Optional, Union, Dict, Iterable, Tuple, List
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -16,6 +17,33 @@ import math
 
 
 DATE_RE = re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})")
+
+
+def start_of_day_local_to_utc(d: date):
+    local = datetime(d.year, d.month, d.day)
+    return local.astimezone(timezone.utc)
+
+
+def end_of_day_local_to_utc(d: date):
+    local = datetime(d.year, d.month, d.day, 23, 59, 59, 999000)
+    return local.astimezone(timezone.utc)
+
+
+def _timestamp_to_local_date(value) -> Optional[date]:
+    if value is None:
+        return None
+    if hasattr(value, "to_datetime"):
+        try:
+            value = value.to_datetime()
+        except Exception:
+            return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.date()
+        return value.astimezone().date()
+    if isinstance(value, date):
+        return value
+    return None
 
 
 def parse_baja_texto_largo(raw: str) -> date | None:
@@ -493,6 +521,10 @@ def abrir_gestion_usuarios(db):
 
     datos_originales = []
     entradas_filtro = {}
+    rows_by_iid: Dict[str, Dict[str, str]] = {}
+    upcoming_by_uid: Dict[str, List[date]] = defaultdict(list)
+    cal_popup: Optional[tk.Toplevel] = None
+    cal_uid: Optional[str] = None
 
     ventana.grid_rowconfigure(2, weight=1)
     ventana.grid_columnconfigure(0, weight=1)
@@ -534,6 +566,7 @@ def abrir_gestion_usuarios(db):
     scrollbar_x.grid(row=1, column=0, sticky="ew")
 
     tree.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+    tree.tag_configure("has_days_row", foreground="#b00020")
 
     frame_status = ttk.Frame(ventana)
     frame_status.grid(row=3, column=0, sticky="ew")
@@ -543,6 +576,84 @@ def abrir_gestion_usuarios(db):
     ttk.Label(frame_status, textvariable=contador_var).grid(row=0, column=1, sticky="e", padx=10, pady=5)
 
     COL_INDEX = {name: i for i, name in enumerate(tree["columns"])}
+    nombre_col_index = COL_INDEX.get("Nombre", 1)
+    nombre_col_id = f"#{nombre_col_index + 1}"
+
+    def formatear_nombre(uid: str, nombre: Optional[str]) -> str:
+        base = (nombre or "Falta")
+        return ("🔴 " if uid in upcoming_by_uid else "") + base
+
+    def row_to_values(row: Dict[str, str]) -> List[str]:
+        valores: List[str] = []
+        for col in columnas:
+            valor = row.get(col, "")
+            if col == "Nombre":
+                valor = formatear_nombre(row.get("UID", ""), valor)
+            valores.append(valor)
+        return valores
+
+    def _hide_cal_popup():
+        nonlocal cal_popup, cal_uid
+        if cal_popup and cal_popup.winfo_exists():
+            cal_popup.destroy()
+        cal_popup = None
+        cal_uid = None
+
+    def _show_cal_for(uid: str):
+        nonlocal cal_popup, cal_uid
+        fechas = sorted(upcoming_by_uid.get(uid, []))
+        if not fechas:
+            _hide_cal_popup()
+            return
+        x = tree.winfo_pointerx() + 10
+        y = tree.winfo_pointery() + 10
+        _hide_cal_popup()
+        cal_popup = tk.Toplevel(ventana)
+        cal_popup.overrideredirect(True)
+        try:
+            cal_popup.attributes("-topmost", True)
+        except Exception:
+            pass
+        cal_popup.geometry(f"+{x}+{y}")
+
+        primera = fechas[0]
+        calendario = Calendar(
+            cal_popup,
+            selectmode="none",
+            year=primera.year,
+            month=primera.month,
+            day=primera.day,
+        )
+        calendario.pack()
+        calendario.tag_config("libre", background="#b00020", foreground="white")
+        for dia in fechas:
+            calendario.calevent_create(dia, "Día libre", "libre")
+
+        def _cerrar(_event=None):
+            _hide_cal_popup()
+
+        cal_popup.bind("<Leave>", _cerrar)
+        cal_popup.bind("<FocusOut>", _cerrar)
+        cal_uid = uid
+
+    def _hover_calendar(event):
+        if not upcoming_by_uid:
+            return
+        region = tree.identify("region", event.x, event.y)
+        if region != "cell":
+            _hide_cal_popup()
+            return
+        row_id = tree.identify_row(event.y)
+        col_id = tree.identify_column(event.x)
+        if not row_id or col_id != nombre_col_id:
+            _hide_cal_popup()
+            return
+        if row_id not in upcoming_by_uid:
+            _hide_cal_popup()
+            return
+        if cal_uid == row_id and cal_popup and cal_popup.winfo_exists():
+            return
+        _show_cal_for(row_id)
 
     def _cell(item, col_name):
         vals = tree.item(item, "values")
@@ -626,6 +737,7 @@ def abrir_gestion_usuarios(db):
         actualizar_contador()
 
     def aplicar_filtros():
+        _hide_cal_popup()
         tree.delete(*tree.get_children())
         criterios = {col: entradas_filtro[col].get().strip().lower() for col in columnas}
         for row in datos_originales:
@@ -636,7 +748,11 @@ def abrir_gestion_usuarios(db):
                     visible = False
                     break
             if visible:
-                tree.insert("", "end", iid=row["UID"], values=[row.get(c, "") for c in columnas])
+                uid_row = row["UID"]
+                valores = row_to_values(row)
+                tags = ("has_days_row",) if uid_row in upcoming_by_uid else ()
+                tree.insert("", "end", iid=uid_row, values=valores, tags=tags)
+                rows_by_iid[uid_row] = row
         toggle_seleccionar_todos()
         ajustar_altura_tree()
 
@@ -680,7 +796,11 @@ def abrir_gestion_usuarios(db):
             actualizar_contador()
         else:
             x, y, width, height = tree.bbox(item_id, column=col)
-            valor_actual = tree.set(item_id, col_nombre)
+            if col_nombre == "Nombre":
+                fila_actual = rows_by_iid.get(item_id, {})
+                valor_actual = fila_actual.get("Nombre", "")
+            else:
+                valor_actual = tree.set(item_id, col_nombre)
             entry = tk.Entry(tree)
             entry.insert(0, valor_actual)
             entry.place(x=x, y=y, width=width, height=height)
@@ -688,12 +808,19 @@ def abrir_gestion_usuarios(db):
 
             def guardar_valor(event=None):
                 nuevo_valor = entry.get()
-                tree.set(item_id, col_nombre, nuevo_valor)
+                display_value = (
+                    formatear_nombre(item_id, nuevo_valor)
+                    if col_nombre == "Nombre"
+                    else nuevo_valor
+                )
+                tree.set(item_id, col_nombre, display_value)
                 guardar_dato(item_id, col_nombre, nuevo_valor)
                 for fila in datos_originales:
                     if fila["UID"] == item_id:
                         fila[col_nombre] = nuevo_valor
                         break
+                if item_id in rows_by_iid:
+                    rows_by_iid[item_id][col_nombre] = nuevo_valor
                 entry.destroy()
 
             entry.bind("<Return>", guardar_valor)
@@ -702,6 +829,9 @@ def abrir_gestion_usuarios(db):
     def cargar_datos():
         nonlocal datos_originales
         datos_originales = []
+        rows_by_iid.clear()
+        upcoming_by_uid.clear()
+        _hide_cal_popup()
         tree.delete(*tree.get_children())
 
         t0 = time.time()
@@ -709,6 +839,31 @@ def abrir_gestion_usuarios(db):
         t1 = time.time()
 
         hoy = dt.datetime.now().date()
+        rango_fin = hoy + timedelta(days=5)
+        try:
+            peticiones_cursor = list(
+                db.collection("Peticiones")
+                .where("Admitido", "==", "Ok")
+                .where("Fecha", ">=", start_of_day_local_to_utc(hoy))
+                .where("Fecha", "<=", end_of_day_local_to_utc(rango_fin))
+                .stream()
+            )
+        except Exception as exc:
+            peticiones_cursor = []
+            print(f"⚠️ No se pudieron obtener las peticiones próximas: {exc}")
+        for pet_doc in peticiones_cursor:
+            data_pet = pet_doc.to_dict() or {}
+            uid_pet = data_pet.get("uid") or data_pet.get("Uid")
+            if not uid_pet:
+                continue
+            fecha_pet = _timestamp_to_local_date(data_pet.get("Fecha"))
+            if not fecha_pet:
+                continue
+            if hoy <= fecha_pet <= rango_fin:
+                upcoming_by_uid[uid_pet].append(fecha_pet)
+        for fechas in upcoming_by_uid.values():
+            fechas.sort()
+
         dnis = set()
         min_alta = hoy - timedelta(days=365)
         for doc in usuarios_docs:
@@ -862,7 +1017,10 @@ def abrir_gestion_usuarios(db):
                     batch.commit()
                     batch = db.batch()
             datos_originales.append(fila)
-            tree.insert("", "end", iid=uid, values=[fila[col] for col in columnas])
+            rows_by_iid[uid] = fila
+            valores = row_to_values(fila)
+            tags = ("has_days_row",) if uid in upcoming_by_uid else ()
+            tree.insert("", "end", iid=uid, values=valores, tags=tags)
             if idx % 200 == 0:
                 print(f"Procesados {idx}/{total}")
         if ops % 400:
@@ -892,6 +1050,8 @@ def abrir_gestion_usuarios(db):
                 if fila["UID"] == uid:
                     fila["Mensaje"] = nuevo_valor
                     break
+            if uid in rows_by_iid:
+                rows_by_iid[uid]["Mensaje"] = nuevo_valor
         actualizar_contador()
 
     def eliminar_usuario():
@@ -926,9 +1086,17 @@ def abrir_gestion_usuarios(db):
             messagebox.showerror("❌ Error", f"No se pudo eliminar el usuario:\n{e}")
     def guardar_todo():
         for item in tree.get_children():
-            valores = tree.item(item, "values")
             uid = item
-            datos = dict(zip(columnas, valores))
+            fila_base = rows_by_iid.get(uid)
+            if fila_base:
+                datos = {col: fila_base.get(col, "") for col in columnas}
+            else:
+                valores = tree.item(item, "values")
+                datos = {}
+                for col, valor in zip(columnas, valores):
+                    if col == "Nombre" and isinstance(valor, str) and valor.startswith("🔴 "):
+                        valor = valor[2:]
+                    datos[col] = valor
 
             # Conversión de tipos
             for campo in ["Mensaje", "Seleccionable", "Valor"]:
@@ -966,6 +1134,10 @@ def abrir_gestion_usuarios(db):
     tree.bind("<Double-1>", editar_celda)
     tree.bind("<<TreeviewSelect>>", actualizar_contador)
     tree.bind("<ButtonRelease-1>", lambda e: tree.after(1, actualizar_contador))
+    tree.bind("<Motion>", _hover_calendar)
+    tree.bind("<Leave>", lambda e: _hide_cal_popup())
+    tree.bind("<ButtonPress-1>", lambda e: _hide_cal_popup())
+    tree.bind("<MouseWheel>", lambda e: _hide_cal_popup())
     ventana.bind("<Configure>", ajustar_altura_tree)
 
     cargar_datos()
