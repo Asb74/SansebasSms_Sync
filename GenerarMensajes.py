@@ -7,6 +7,8 @@ try:
 except Exception:  # pragma: no cover - tkcalendar opcional
     DateEntry = None  # type: ignore
 
+from GestionUsuarios import on_mensajes_generados
+
 ventana_generar = None
 
 
@@ -144,6 +146,8 @@ def abrir_generar_mensajes(db, preset=None):
 
         btn_guardar.config(state="disabled")
         ventana_generar.update_idletasks()
+        uids_afectados = []
+
         try:
             usuarios = db.collection("UsuariosAutorizados").where("Mensaje", "==", True).stream()
             count = 0
@@ -166,11 +170,14 @@ def abrir_generar_mensajes(db, preset=None):
                 }
                 db.collection("Mensajes").document(doc_id).set(payload, merge=True)
                 count += 1
+                uids_afectados.append(uid)
                 ventana_generar.update_idletasks()
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron crear los mensajes: {e}")
             btn_guardar.config(state="normal")
             return
+
+        on_mensajes_generados(uids_afectados, db)
 
         messagebox.showinfo("OK", f"Mensajes creados para {count} usuarios")
         ventana_generar.destroy()
