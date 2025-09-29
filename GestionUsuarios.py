@@ -577,7 +577,8 @@ def abrir_gestion_usuarios(db):
     frame_status.grid(row=3, column=0, sticky="ew")
     frame_status.grid_columnconfigure(0, weight=1)
     contador_var = tk.StringVar(value="Seleccionados para Mensaje: 0")
-    ttk.Label(frame_status).grid(row=0, column=0, sticky="ew")
+    ultima_act_var = tk.StringVar(value="")
+    ttk.Label(frame_status, textvariable=ultima_act_var).grid(row=0, column=0, sticky="w", padx=10)
     ttk.Label(frame_status, textvariable=contador_var).grid(row=0, column=1, sticky="e", padx=10, pady=5)
 
     COL_INDEX = {name: i for i, name in enumerate(tree["columns"])}
@@ -1128,6 +1129,41 @@ def abrir_gestion_usuarios(db):
 
         messagebox.showinfo("✅ Guardado", "Todos los cambios han sido guardados en Firebase.")
 
+    cargando = False
+
+    def refrescar():
+        nonlocal cargando
+        if cargando:
+            return
+        cargando = True
+        try:
+            _hide_cal_popup()
+
+            hay_filtros = any(entradas_filtro[c].get().strip() for c in columnas)
+
+            y0 = tree.yview()
+
+            cargar_datos()
+
+            if hay_filtros:
+                aplicar_filtros()
+
+            try:
+                tree.yview_moveto(y0[0])
+            except Exception:
+                pass
+
+            actualizar_contador()
+
+            from datetime import datetime as _dt
+
+            ultima_act_var.set("Actualizado: " + _dt.now().strftime("%H:%M:%S"))
+        finally:
+            cargando = False
+
+    btn_actualizar = tk.Button(frame_botones, text="🔄 Actualizar", command=refrescar)
+    btn_actualizar.pack(side="left", padx=10)
+
     tk.Button(frame_botones, text="🔍 Filtrar", command=aplicar_filtros).pack(side="left", padx=10)
     tk.Button(frame_botones, text="🧹 Limpiar", command=limpiar_filtros).pack(side="left", padx=10)
     tk.Checkbutton(frame_botones, text="Seleccionar Todos", variable=seleccionar_todos_var, command=toggle_seleccionar_todos).pack(side="left", padx=10)
@@ -1143,5 +1179,7 @@ def abrir_gestion_usuarios(db):
     tree.bind("<ButtonPress-1>", lambda e: _hide_cal_popup())
     tree.bind("<MouseWheel>", lambda e: _hide_cal_popup())
     ventana.bind("<Configure>", ajustar_altura_tree)
+    ventana.bind("<F5>", lambda e: refrescar())
+    ventana.bind("<Control-r>", lambda e: refrescar())
 
-    cargar_datos()
+    refrescar()
