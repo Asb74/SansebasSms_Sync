@@ -97,7 +97,45 @@ def parse_access_date(raw) -> date | None:
 
 
 # Ventana principal de gestión de usuarios (singleton)
-ventana_usuarios = None
+# -- Notificación desde otras pantallas (p.ej. Gestión de Mensajes)
+ventana_usuarios = None          # ya existe; asegúrate que es global
+_notify_reset_cb = None          # callback para actualizar UI abierta
+
+
+def on_mensajes_generados(uids, db):
+    """
+    Llamar desde Gestión de Mensajes al finalizar el envío/creación.
+    - uids: lista de uid (str) a los que se les generó mensaje
+    - db: cliente Firestore
+    Efectos:
+      1) Actualiza Firestore: UsuariosAutorizados/{uid}.Mensaje = False (bool)
+      2) Si Gestión de Usuarios está abierta, actualiza UI en caliente.
+    """
+    if not uids:
+        return
+
+    # 1) Actualiza Firestore en batch
+    try:
+        batch = db.batch()
+        ops = 0
+        for uid in uids:
+            ref = db.collection("UsuariosAutorizados").document(uid)
+            batch.update(ref, {"Mensaje": False})
+            ops += 1
+            if ops % 400 == 0:
+                batch.commit()
+                batch = db.batch()
+        if ops % 400:
+            batch.commit()
+    except Exception as e:
+        print(f"⚠️ No se pudo actualizar Mensaje=False en Firestore: {e}")
+
+    # 2) Actualiza la UI si está abierta
+    if _notify_reset_cb is not None:
+        try:
+            _notify_reset_cb(list(uids))
+        except Exception as e:
+            print(f"⚠️ Error notificando a Gestión de Usuarios: {e}")
 
 # Funciones auxiliares de normalización
 def s(x):
@@ -495,7 +533,7 @@ def migrar_cultivo_a_genero(db, cursor) -> None:
 
 def abrir_gestion_usuarios(db):
     """Abre la ventana de gestión de usuarios evitando duplicados."""
-    global ventana_usuarios
+    global ventana_usuarios, _notify_reset_cb
     if ventana_usuarios and ventana_usuarios.winfo_exists():
         ventana_usuarios.lift()
         ventana_usuarios.focus_force()
@@ -505,13 +543,6 @@ def abrir_gestion_usuarios(db):
     ventana = ventana_usuarios
     ventana.title("👥 Gestión de Usuarios")
     ventana.geometry("1400x600")
-
-    def on_close():
-        global ventana_usuarios
-        ventana_usuarios = None
-        ventana.destroy()
-
-    ventana.protocol("WM_DELETE_WINDOW", on_close)
 
     columnas = ["Dni", "Nombre", "Telefono", "correo", "Puesto", "Turno", "Genero",
                 "Mensaje", "Seleccionable", "Valor", "Alta", "UltimoDia", "TotalDia", "TotalHoras", "Baja", "Codigo"]
@@ -676,6 +707,28 @@ def abrir_gestion_usuarios(db):
             if _is_true(_cell(it, "Mensaje")):
                 n += 1
         contador_var.set(f"Seleccionados con Mensaje=True: {n}")
+
+    def __apply_reset_in_ui(uids):
+        """Actualiza la columna Mensaje a False en la UI abierta."""
+
+        def _do():
+            for uid in uids:
+                if tree.exists(uid):
+                    tree.set(uid, "Mensaje", "False")
+                if uid in rows_by_iid:
+                    rows_by_iid[uid]["Mensaje"] = "False"
+                for fila in datos_originales:
+                    if fila.get("UID") == uid:
+                        fila["Mensaje"] = "False"
+                        break
+            actualizar_contador()
+
+        try:
+            ventana.after(0, _do)
+        except Exception:
+            _do()
+
+    _notify_reset_cb = __apply_reset_in_ui
 
     style = ttk.Style()
 
@@ -1170,6 +1223,14 @@ def abrir_gestion_usuarios(db):
     tk.Button(frame_botones, text="Mensaje", command=toggle_mensaje).pack(side="left", padx=10)
     tk.Button(frame_botones, text="🗑 Eliminar seleccionado", bg="salmon", command=eliminar_usuario).pack(side="left", padx=10)
     tk.Button(frame_botones, text="💾 Guardar todo", bg="lightgreen", command=guardar_todo).pack(side="left", padx=10)
+
+    def on_close():
+        global ventana_usuarios, _notify_reset_cb
+        _notify_reset_cb = None
+        ventana_usuarios = None
+        ventana.destroy()
+
+    ventana.protocol("WM_DELETE_WINDOW", on_close)
 
     tree.bind("<Double-1>", editar_celda)
     tree.bind("<<TreeviewSelect>>", actualizar_contador)
