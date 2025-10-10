@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import firebase_admin
-from firebase_admin import credentials, exceptions, firestore, messaging
+from firebase_admin import credentials, firestore, messaging
 import pandas as pd
 import datetime
 import os
@@ -13,7 +13,6 @@ from GestionMensajes import abrir_gestion_mensajes
 from GenerarMensajes import abrir_generar_mensajes
 from decimal import Decimal
 from typing import Optional
-from google.api_core import exceptions as gcloud_exceptions
 from google.cloud.firestore_v1.base_query import FieldFilter
 import logging
 import threading
@@ -86,39 +85,43 @@ credenciales_dinamicas = {"ruta": "sansebassms.json"}
 project_info = {"id": None}
 carpeta_excel = {"ruta": None}
 archivo_notificados = "notificados.json"
+PROJECT_ID_JSON: Optional[str] = None
 
-# Inicializar Firebase
 try:
     if not os.path.exists(credenciales_dinamicas["ruta"]):
-        logging.warning("Archivo de credenciales no encontrado, solicitando al usuario.")
-        root = tk.Tk()
-        root.withdraw()
+        root = tk.Tk(); root.withdraw()
         nueva_ruta = filedialog.askopenfilename(
             title="Selecciona archivo de credenciales",
             filetypes=[("Archivos JSON", "*.json")]
         )
         if not nueva_ruta:
-            messagebox.showinfo(
-                "Credenciales",
-                "No se seleccionó archivo de credenciales. La aplicación se cerrará."
-            )
+            messagebox.showinfo("Credenciales", "No se seleccionó archivo de credenciales. La aplicación se cerrará.")
             root.destroy()
-            raise SystemExit("Credenciales no proporcionadas")
+            raise SystemExit(1)
         credenciales_dinamicas["ruta"] = nueva_ruta
         root.destroy()
 
     with open(credenciales_dinamicas["ruta"], "r", encoding="utf-8") as f:
         data = json.load(f)
-        project_info["id"] = data.get("project_id")
-        logging.info("Firebase project id: %s", project_info["id"])
+
+    PROJECT_ID_JSON = data.get("project_id")              # p.ej., 'sansebassms'
+    PROJECT_NUMBER   = "639295820337"                     # ⚠️ el de tu consola (de la captura)
+    ENV_FORCED_ID    = os.environ.get("FCM_PROJECT_ID")   # opcional, por variable de entorno
+
+    # Usamos el número por defecto (más robusto en v1). Permite override por env.
+    project_effective = ENV_FORCED_ID or PROJECT_NUMBER
+    project_info["id"] = project_effective
 
     cred = credentials.Certificate(credenciales_dinamicas["ruta"])
-    firebase_admin.initialize_app(cred)
+    firebase_admin.initialize_app(cred, {"projectId": project_effective})
     db = firestore.client()
+
+    logging.info("Firebase project id (JSON): %s", PROJECT_ID_JSON)
+    logging.info("Firebase project (efectivo): %s", project_effective)
 except SystemExit:
     raise
-except Exception:
-    logging.exception("Error al inicializar Firebase")
+except Exception as e:
+    logging.exception("Error al inicializar Firebase: %s", e)
     raise SystemExit(1)
 
 
@@ -157,109 +160,50 @@ def get_doc_safe(doc_ref):
     return None
 
 
-def diagnosticar_fcm() -> None:
-    try:
-        current_project = project_info.get("id")
-        app_name = firebase_admin.get_app().name
-    except Exception as exc:  # noqa: BLE001
-        logging.exception("No se pudo obtener información de Firebase para diagnóstico")
-        if ventana is not None:
-            error(ventana, "Diagnóstico FCM", f"No se pudo obtener información: {exc}")
-        return
+# Server key del proyecto (LEGACY). Cárgala por variable de entorno.
+LEGACY_KEY = os.environ.get("FCM_LEGACY_SERVER_KEY")
 
-    logging.info("Diagnóstico FCM - Project ID (JSON): %s", current_project)
-    logging.info("Diagnóstico FCM - App Name: %s", app_name)
-    if ventana is not None:
+
+def send_legacy(token: str, title: str, body: str, data: dict) -> bool:
+    """Envío FCM por endpoint legacy /fcm/send. Úsalo sólo como fallback."""
+    if not LEGACY_KEY:
+        return False
+    try:
+        import requests
+        r = requests.post(
+            "https://fcm.googleapis.com/fcm/send",
+            headers={
+                "Authorization": f"key={LEGACY_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "to": token,
+                "notification": {"title": title, "body": body},
+                "data": {k: str(v) for k, v in (data or {}).items()},
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        j = r.json()
+        return j.get("success", 0) == 1
+    except Exception:
+        logging.exception("Legacy FCM fallo")
+        return False
+
+
+def diagnosticar_fcm():
+    try:
+        app = firebase_admin.get_app()
         info(
             ventana,
             "Diagnóstico FCM",
-            f"Project ID (JSON): {current_project}\nApp Name: {app_name}",
+            f"Project JSON: {PROJECT_ID_JSON}\n"
+            f"Project efectivo: {project_info['id']}\n"
+            f"Admin app: {app.name}\n"
+            f"Legacy KEY presente: {'sí' if LEGACY_KEY else 'no'}",
         )
-
-    try:
-        candidatos = with_retry(
-            lambda: db.collection("UsuariosAutorizados")
-            .where(filter=FieldFilter("fcmToken", "!=", None))
-            .limit(1)
-            .get()
-        )
-    except Exception as exc:  # noqa: BLE001
-        logging.exception("No se pudo buscar tokens para diagnóstico")
-        if ventana is not None:
-            warn(ventana, "Diagnóstico FCM", f"No se pudo buscar tokens: {exc}")
-        return
-
-    if not candidatos:
-        logging.warning("Diagnóstico FCM: no se encontraron usuarios con fcmToken")
-        if ventana is not None:
-            warn(ventana, "Diagnóstico FCM", "No se encontró ningún usuario con fcmToken.")
-        return
-
-    usuario = candidatos[0]
-    datos = usuario.to_dict() or {}
-    token = datos.get("fcmToken")
-    uid = usuario.id
-
-    if not _is_valid_fcm_token(token):
-        logging.warning("Diagnóstico FCM: token inválido para %s", uid)
-        if ventana is not None:
-            warn(ventana, "Diagnóstico FCM", "El token obtenido no es válido.")
-        return
-
-    mensaje = messaging.Message(
-        token=token,
-        notification=messaging.Notification(
-            title="🔍 Diagnóstico FCM",
-            body="Mensaje de prueba desde Sansebassms Sync",
-        ),
-        data={"diagnostico": "true"},
-    )
-
-    try:
-        respuesta = with_retry(lambda: messaging.send(mensaje, dry_run=False))
-        logging.info("Diagnóstico FCM: mensaje enviado a %s (%s)", uid, respuesta)
-        if ventana is not None:
-            info(
-                ventana,
-                "Diagnóstico FCM",
-                "✅ Mensaje de prueba enviado correctamente.",
-            )
-    except exceptions.UnregisteredError:
-        logging.warning("TOKEN INVALIDO/DE OTRO PROYECTO")
-        try:
-            with_retry(
-                lambda: db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None})
-            )
-            logging.info("Diagnóstico FCM: fcmToken limpiado para %s", uid)
-        except Exception:  # noqa: BLE001
-            logging.exception("No se pudo limpiar el token inválido para %s", uid)
-        if ventana is not None:
-            warn(
-                ventana,
-                "Diagnóstico FCM",
-                "El token no es válido. Se ha marcado para regenerar.",
-            )
-    except Exception as exc:  # noqa: BLE001
-        texto = str(exc)
-        if (
-            isinstance(exc, gcloud_exceptions.NotFound)
-            or ("404" in texto and "/v1" in texto)
-        ):
-            logging.error("Diagnóstico FCM: %s", texto, exc_info=True)
-            if ventana is not None:
-                error(
-                    ventana,
-                    "Diagnóstico FCM",
-                    "PROJECT_ID INCORRECTO O FCM NO HABILITADO",
-                )
-        else:
-            logging.exception("Error al enviar mensaje de diagnóstico")
-            if ventana is not None:
-                error(
-                    ventana,
-                    "Diagnóstico FCM",
-                    f"Error al enviar mensaje de prueba: {exc}",
-                )
+    except Exception as e:
+        error(ventana, "Diagnóstico FCM", str(e))
 
 
 def enviar_notificaciones_push():
@@ -275,24 +219,22 @@ def enviar_notificaciones_push():
             info(ventana, "Notificaciones", "No hay mensajes pendientes.")
             return
 
-        # cargar lista de ya notificados
+        # notificados para no repetir
         notificados: list[str] = []
         if os.path.exists(archivo_notificados):
             with open(archivo_notificados, "r", encoding="utf-8") as f:
                 notificados = json.load(f)
 
-        # preparar destinatarios
-        objetivos = []  # (doc_id, uid, token, mensaje)
+        objetivos = []  # (doc_id, uid, token, cuerpo)
         for doc in pendientes:
             if doc.id in notificados:
                 continue
-            data = doc.to_dict() or {}
-            uid = data.get("uid")
-            cuerpo = data.get("mensaje", "Tienes un mensaje pendiente")
+            d = doc.to_dict() or {}
+            uid = d.get("uid")
+            cuerpo = d.get("mensaje", "Tienes un mensaje pendiente")
             if not uid:
                 logging.warning("Documento %s sin uid; se omite", doc.id)
                 continue
-
             snap = get_doc_safe(db.collection("UsuariosAutorizados").document(uid))
             if snap is None:
                 logging.warning("Usuario %s no encontrado al enviar push", uid)
@@ -301,15 +243,13 @@ def enviar_notificaciones_push():
             if not token or not isinstance(token, str):
                 logging.warning("Token FCM vacío/invalid para %s; se omite", uid)
                 continue
-
             objetivos.append((doc.id, uid, token, cuerpo))
 
         if not objetivos:
             info(ventana, "Notificaciones", "No hay destinatarios válidos.")
             return
 
-        ok = 0
-        total = len(objetivos)
+        ok, total = 0, len(objetivos)
         logging.info("Destinatarios a enviar: %d", total)
 
         for doc_id, uid, token, cuerpo in objetivos:
@@ -321,28 +261,41 @@ def enviar_notificaciones_push():
                         title="📩 Nuevo mensaje pendiente",
                         body=cuerpo
                     ),
-                    data={"accion": "abrir_usuario_screen"}
+                    data={"accion":"abrir_usuario_screen"}
                 )
-                # devuelve message_id si OK; lanza excepción si falla
-                return messaging.send(msg, dry_run=False)
+                return messaging.send(msg, dry_run=False)  # devuelve message_id
 
             try:
                 _ = with_retry(_send_one)
                 ok += 1
                 notificados.append(doc_id)
+
             except Exception as err:
                 txt = str(err)
                 logging.error("Error enviando a %s: %s", uid, txt, exc_info=True)
+
+                # Fallback legacy sólo para 404/Not Found/UNREGISTERED
+                should_fallback = ("404" in txt) or ("Not Found" in txt) or ("UNREGISTERED" in txt)
+                if should_fallback and LEGACY_KEY:
+                    if send_legacy(token, "📩 Nuevo mensaje pendiente", cuerpo, {"accion":"abrir_usuario_screen"}):
+                        ok += 1
+                        notificados.append(doc_id)
+                        logging.info("Envío legacy OK para %s", uid)
+                        time.sleep(0.05)
+                        continue
+
                 if "UNREGISTERED" in txt or "INVALID_ARGUMENT" in txt:
                     with_retry(lambda: db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None}))
                     logging.info("fcmToken inválido limpiado para %s", uid)
+
             finally:
-                time.sleep(0.05)  # 50ms para no saturar
+                time.sleep(0.05)  # 50 ms entre envíos para no saturar
 
         with open(archivo_notificados, "w", encoding="utf-8") as f:
             json.dump(notificados, f, ensure_ascii=False, indent=2)
 
         info(ventana, "Resultado", f"✅ Notificaciones enviadas: {ok}/{total}")
+
     except Exception as e:
         logging.exception("Fallo al enviar notificaciones")
         error(ventana, "Error", f"No se pudieron enviar notificaciones: {e}")
