@@ -2,10 +2,13 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import firebase_admin
 from firebase_admin import credentials, firestore, messaging
+from firebase_admin._messaging_utils import UnregisteredError
 import pandas as pd
 import datetime
 import os
 import json
+import re
+import requests
 from dateutil import parser
 from PIL import Image, ImageTk
 from GestionUsuarios import abrir_gestion_usuarios
@@ -52,9 +55,79 @@ def _safe_str(v) -> Optional[str]:
     return s if s else None
 
 
+_FCM_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-:.]{100,}$")
+
+
 def _is_valid_fcm_token(token: Optional[str]) -> bool:
     token = _safe_str(token)
-    return bool(token)
+    if not token:
+        return False
+    return bool(_FCM_TOKEN_RE.match(token))
+
+
+# ---------------- FCM Legacy helpers ----------------
+def _get_legacy_key() -> Optional[str]:
+    """
+    Devuelve la legacy server key desde:
+    1) variable de entorno FCM_LEGACY_SERVER_KEY
+    2) archivo local 'fcm_legacy.key' en cwd
+    """
+    k = os.environ.get("FCM_LEGACY_SERVER_KEY")
+    if k:
+        k = k.strip()
+        if k:
+            return k
+    path = os.path.join(os.getcwd(), "fcm_legacy.key")
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                k = fh.read().strip()
+                return k or None
+        except Exception:
+            logging.exception("No se pudo leer fcm_legacy.key")
+    return None
+
+
+def _send_legacy_one(token: str, title: str, body: str, data: dict | None = None) -> dict:
+    """
+    Envía una notificación con FCM Legacy HTTP.
+    Retorna el JSON de respuesta (dict).
+    Lanza HTTPError si status != 200.
+    """
+    server_key = _get_legacy_key()
+    if not server_key:
+        raise RuntimeError("No hay FCM_LEGACY_SERVER_KEY configurada")
+    url = "https://fcm.googleapis.com/fcm/send"
+    headers = {
+        "Authorization": f"key={server_key}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    payload = {
+        "to": token,
+        "notification": {"title": title, "body": body},
+        "data": data or {},
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=15)
+    r.raise_for_status()
+    try:
+        return r.json()
+    except Exception:
+        logging.exception("Respuesta legacy no es JSON")
+        return {}
+
+
+def _handle_legacy_result(res_json: dict) -> tuple[bool, str]:
+    """
+    Interpreta la respuesta legacy:
+    - True/False de éxito
+    - error string si aplica (p.ej. NotRegistered, InvalidRegistration)
+    """
+    ok = bool(res_json.get("success"))
+    err = ""
+    results = res_json.get("results") or []
+    if results:
+        err = results[0].get("error", "") or ""
+    return ok, err
 
 
 ventana: Optional[tk.Tk] = None
@@ -155,36 +228,6 @@ def get_doc_safe(doc_ref):
     return None
 
 
-# Server key del proyecto (LEGACY). Cárgala por variable de entorno.
-LEGACY_KEY = os.environ.get("FCM_LEGACY_SERVER_KEY")
-
-
-def send_legacy(token: str, title: str, body: str, data: dict) -> bool:
-    if not LEGACY_KEY:
-        return False
-    try:
-        import requests
-        r = requests.post(
-            "https://fcm.googleapis.com/fcm/send",
-            headers={
-                "Authorization": f"key={LEGACY_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "to": token,
-                "notification": {"title": title, "body": body},
-                "data": {k: str(v) for k, v in (data or {}).items()},
-            },
-            timeout=10,
-        )
-        r.raise_for_status()
-        j = r.json()
-        return j.get("success", 0) == 1
-    except Exception:
-        logging.exception("Legacy FCM fallo")
-        return False
-
-
 def _is_v1_404_text(txt: str) -> bool:
     t = txt.upper()
     return ("404" in t and "V1/PROJECTS" in t) or "REQUESTED ENTITY WAS NOT FOUND" in t or "NOT FOUND" in t
@@ -205,7 +248,7 @@ def diagnosticar_fcm():
             f"Project JSON: {PROJECT_ID_JSON}\n"
             f"Project efectivo: {project_info['id']}\n"
             f"Admin app: {app.name}\n"
-            f"Legacy KEY presente: {'sí' if LEGACY_KEY else 'no'}\n\n"
+            f"Legacy KEY presente: {'sí' if _get_legacy_key() else 'no'}\n\n"
             f"Habilitar FCM v1 aquí:\n{enlace}"
         )
     except Exception as e:
@@ -213,108 +256,129 @@ def diagnosticar_fcm():
 
 
 def enviar_notificaciones_push():
-    logging.info("Proyecto activo (JSON): %s", project_info["id"])
-    logging.info("Enviando notificaciones una a una (Admin SDK)")
+    logging.info("Iniciando envío de notificaciones push")
     try:
-        pendientes = with_retry(
+        legacy_key = _get_legacy_key()
+        usar_legacy = bool(legacy_key)
+        logging.info("Proyecto activo: %s", project_info.get("id"))
+        logging.info("Modo envío: %s", "FCM Legacy" if usar_legacy else "Admin SDK v1")
+
+        snapshot = with_retry(
             lambda: db.collection("Mensajes").where(
                 filter=FieldFilter("estado", "==", "Pendiente")
             ).get()
         )
-        if not pendientes:
+        if not snapshot:
             info(ventana, "Notificaciones", "No hay mensajes pendientes.")
             return
 
-        # notificados para no repetir
         notificados: list[str] = []
         if os.path.exists(archivo_notificados):
             with open(archivo_notificados, "r", encoding="utf-8") as f:
                 notificados = json.load(f)
 
-        objetivos = []  # (doc_id, uid, token, cuerpo)
-        for doc in pendientes:
+        nuevos: list[str] = []
+        objetivos: list[tuple[str, str, str, str]] = []  # (doc_id, uid, token, mensaje)
+
+        for doc in snapshot:
             if doc.id in notificados:
                 continue
-            d = doc.to_dict() or {}
-            uid = d.get("uid")
-            cuerpo = d.get("mensaje", "Tienes un mensaje pendiente")
+
+            datos = doc.to_dict() or {}
+            uid = datos.get("uid")
+            mensaje = datos.get("mensaje", "Tienes un mensaje pendiente")
+
             if not uid:
-                logging.warning("Documento %s sin uid; se omite", doc.id)
+                logging.debug("Documento %s sin uid, se omite", doc.id)
                 continue
-            snap = get_doc_safe(db.collection("UsuariosAutorizados").document(uid))
-            if snap is None:
+
+            usuario_doc = get_doc_safe(db.collection("UsuariosAutorizados").document(uid))
+            if usuario_doc is None:
                 logging.warning("Usuario %s no encontrado al enviar push", uid)
                 continue
-            token = (snap.to_dict() or {}).get("fcmToken")
-            if not token or not isinstance(token, str):
+
+            usuario_data = usuario_doc.to_dict() or {}
+            token = usuario_data.get("fcmToken")
+            if not _is_valid_fcm_token(token):
                 logging.warning("Token FCM vacío/invalid para %s; se omite", uid)
                 continue
-            objetivos.append((doc.id, uid, token, cuerpo))
+            objetivos.append((doc.id, uid, token, mensaje))
 
-        if not objetivos:
-            info(ventana, "Notificaciones", "No hay destinatarios válidos.")
-            return
-
-        ok, total = 0, len(objetivos)
-        logging.info("Destinatarios a enviar: %d", total)
+        logging.info("Destinatarios a enviar: %d", len(objetivos))
+        ok = 0
+        fall = 0
+        limpiados = 0
 
         for doc_id, uid, token, cuerpo in objetivos:
-
-            def _send_one():
-                msg = messaging.Message(
-                    token=token,
-                    notification=messaging.Notification(
-                        title="📩 Nuevo mensaje pendiente",
-                        body=cuerpo
-                    ),
-                    data={"accion":"abrir_usuario_screen"}
-                )
-                return messaging.send(msg, dry_run=False)  # devuelve message_id
-
             try:
-                _ = with_retry(_send_one)
-                ok += 1
-                notificados.append(doc_id)
-
-            except Exception as err:
-                txt = str(err)
-                logging.error("Error enviando a %s: %s", uid, txt, exc_info=True)
-
-                # ❶ Si es 404/Not Found del endpoint v1 → instrucción clara para habilitar API
-                if _is_v1_404_text(txt):
-                    msg = ("No se pudieron enviar notificaciones (FCM v1 404). "
-                           "Habilita 'Firebase Cloud Messaging API (V1)' para el proyecto "
-                           f"'{project_info['id']}'. Abre este enlace y pulsa 'Enable':\n{_firestore_api_hint()}")
-                    error(ventana, "FCM v1 no habilitado", msg)
-
-                    # ❷ Fallback legacy si hay server key
-                    if LEGACY_KEY and send_legacy(
-                        token,
-                        "📩 Nuevo mensaje pendiente",
-                        cuerpo,
-                        {"accion": "abrir_usuario_screen"},
-                    ):
+                if usar_legacy:
+                    res = _send_legacy_one(
+                        token=token,
+                        title="📩 Nuevo mensaje pendiente",
+                        body=cuerpo,
+                        data={"accion": "abrir_usuario_screen"},
+                    )
+                    exito, err = _handle_legacy_result(res)
+                    if exito:
                         ok += 1
-                        notificados.append(doc_id)
-                        logging.info("Envío legacy OK para %s", uid)
-                        time.sleep(0.05)
-                        continue
+                        nuevos.append(doc_id)
+                    else:
+                        if err in ("NotRegistered", "InvalidRegistration", "MismatchSenderId"):
+                            with_retry(lambda: db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None}))
+                            limpiados += 1
+                            logging.info("fcmToken inválido limpiado para %s (%s)", uid, err)
+                        else:
+                            logging.error("Legacy envío fallido para %s: %s", uid, err or res)
+                        fall += 1
+                else:
+                    def _send_one():
+                        msg = messaging.Message(
+                            token=token,
+                            notification=messaging.Notification(
+                                title="📩 Nuevo mensaje pendiente",
+                                body=cuerpo,
+                            ),
+                            data={"accion": "abrir_usuario_screen"},
+                        )
+                        return messaging.send(msg, dry_run=False)
 
-                # Limpieza de tokens inválidos
-                if "UNREGISTERED" in txt or "INVALID_ARGUMENT" in txt:
-                    with_retry(lambda: db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None}))
-                    logging.info("fcmToken inválido limpiado para %s", uid)
-
+                    _ = with_retry(_send_one)
+                    ok += 1
+                    nuevos.append(doc_id)
+            except UnregisteredError:
+                with_retry(lambda: db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None}))
+                limpiados += 1
+                fall += 1
+            except requests.HTTPError as http_err:
+                logging.error("Legacy HTTP error para %s: %s", uid, http_err, exc_info=True)
+                fall += 1
+            except Exception as e:
+                logging.error("Error enviando a %s: %s", uid, e, exc_info=True)
+                fall += 1
             finally:
-                time.sleep(0.05)  # 50 ms entre envíos para no saturar
+                time.sleep(0.05)
 
-        with open(archivo_notificados, "w", encoding="utf-8") as f:
-            json.dump(notificados, f, ensure_ascii=False, indent=2)
+        if nuevos:
+            try:
+                if os.path.exists(archivo_notificados):
+                    with open(archivo_notificados, "r", encoding="utf-8") as f:
+                        ya = json.load(f)
+                else:
+                    ya = []
+                ya.extend(nuevos)
+                with open(archivo_notificados, "w", encoding="utf-8") as f:
+                    json.dump(ya, f)
+                logging.info("Notificaciones marcadas como enviadas: %s", len(nuevos))
+            except Exception:
+                logging.exception("No se pudo actualizar notificados.json")
 
-        info(ventana, "Resultado", f"✅ Notificaciones enviadas: {ok}/{total}")
-
+        info(
+            ventana,
+            "Resultado",
+            f"✅ Enviadas: {ok}/{len(objetivos)}\n🧹 Tokens limpiados: {limpiados}\n❌ Fallidas: {fall}",
+        )
     except Exception as e:
-        logging.exception("Fallo al enviar notificaciones")
+        logging.exception("No se pudieron enviar notificaciones")
         error(ventana, "Error", f"No se pudieron enviar notificaciones: {e}")
 
 def crear_mensajes_para_todos():
