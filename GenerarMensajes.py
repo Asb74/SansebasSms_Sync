@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import datetime as dt
 from datetime import datetime, date, timezone
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 try:
     from tkcalendar import DateEntry
@@ -67,8 +68,8 @@ def _prechequeo_dias_libres(db, fecha_msg: date, uids_sel: list[str]) -> tuple[s
     try:
         peticiones = list(
             db.collection("Peticiones")
-            .where("Fecha", ">=", inicio)
-            .where("Fecha", "<=", fin)
+            .where(filter=FieldFilter("Fecha", ">=", inicio))
+            .where(filter=FieldFilter("Fecha", "<=", fin))
             .stream()
         )
     except Exception:
@@ -280,7 +281,9 @@ def abrir_generar_mensajes(db, preset=None):
         uids_afectados: list[str] = []
 
         try:
-            usuarios_stream = db.collection("UsuariosAutorizados").where("Mensaje", "==", True).stream()
+            usuarios_stream = db.collection("UsuariosAutorizados").where(
+                filter=FieldFilter("Mensaje", "==", True)
+            ).stream()
             usuarios_list = []
             uids_seleccionados: list[str] = []
             for doc_user in usuarios_stream:
