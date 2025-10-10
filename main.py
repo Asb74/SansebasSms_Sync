@@ -104,20 +104,15 @@ try:
     with open(credenciales_dinamicas["ruta"], "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    PROJECT_ID_JSON = data.get("project_id")              # p.ej., 'sansebassms'
-    PROJECT_NUMBER   = "639295820337"                     # ⚠️ el de tu consola (de la captura)
-    ENV_FORCED_ID    = os.environ.get("FCM_PROJECT_ID")   # opcional, por variable de entorno
-
-    # Usamos el número por defecto (más robusto en v1). Permite override por env.
-    project_effective = ENV_FORCED_ID or PROJECT_NUMBER
-    project_info["id"] = project_effective
+    PROJECT_ID_JSON = data.get("project_id")      # <-- usar este SIEMPRE para inicializar
+    project_info["id"] = PROJECT_ID_JSON
 
     cred = credentials.Certificate(credenciales_dinamicas["ruta"])
-    firebase_admin.initialize_app(cred, {"projectId": project_effective})
+    # No forzar projectId al número: rompe Firestore
+    firebase_admin.initialize_app(cred)
     db = firestore.client()
 
-    logging.info("Firebase project id (JSON): %s", PROJECT_ID_JSON)
-    logging.info("Firebase project (efectivo): %s", project_effective)
+    logging.info("Firebase project id (JSON/efectivo): %s", PROJECT_ID_JSON)
 except SystemExit:
     raise
 except Exception as e:
@@ -165,7 +160,6 @@ LEGACY_KEY = os.environ.get("FCM_LEGACY_SERVER_KEY")
 
 
 def send_legacy(token: str, title: str, body: str, data: dict) -> bool:
-    """Envío FCM por endpoint legacy /fcm/send. Úsalo sólo como fallback."""
     if not LEGACY_KEY:
         return False
     try:
@@ -191,24 +185,36 @@ def send_legacy(token: str, title: str, body: str, data: dict) -> bool:
         return False
 
 
+def _is_v1_404_text(txt: str) -> bool:
+    t = txt.upper()
+    return ("404" in t and "V1/PROJECTS" in t) or "REQUESTED ENTITY WAS NOT FOUND" in t or "NOT FOUND" in t
+
+
+def _firestore_api_hint() -> str:
+    # enlace directo a habilitar la API v1 del proyecto actual
+    return f"https://console.cloud.google.com/apis/library/fcm.googleapis.com?project={project_info['id']}"
+
+
 def diagnosticar_fcm():
     try:
         app = firebase_admin.get_app()
+        enlace = f"https://console.cloud.google.com/apis/library/fcm.googleapis.com?project={project_info['id']}"
         info(
             ventana,
             "Diagnóstico FCM",
             f"Project JSON: {PROJECT_ID_JSON}\n"
             f"Project efectivo: {project_info['id']}\n"
             f"Admin app: {app.name}\n"
-            f"Legacy KEY presente: {'sí' if LEGACY_KEY else 'no'}",
+            f"Legacy KEY presente: {'sí' if LEGACY_KEY else 'no'}\n\n"
+            f"Habilitar FCM v1 aquí:\n{enlace}"
         )
     except Exception as e:
         error(ventana, "Diagnóstico FCM", str(e))
 
 
 def enviar_notificaciones_push():
-    logging.info("Proyecto activo: %s", project_info["id"])
-    logging.info("Enviando notificaciones una a una (sin batch)")
+    logging.info("Proyecto activo (JSON): %s", project_info["id"])
+    logging.info("Enviando notificaciones una a una (Admin SDK)")
     try:
         pendientes = with_retry(
             lambda: db.collection("Mensajes").where(
@@ -274,16 +280,27 @@ def enviar_notificaciones_push():
                 txt = str(err)
                 logging.error("Error enviando a %s: %s", uid, txt, exc_info=True)
 
-                # Fallback legacy sólo para 404/Not Found/UNREGISTERED
-                should_fallback = ("404" in txt) or ("Not Found" in txt) or ("UNREGISTERED" in txt)
-                if should_fallback and LEGACY_KEY:
-                    if send_legacy(token, "📩 Nuevo mensaje pendiente", cuerpo, {"accion":"abrir_usuario_screen"}):
+                # ❶ Si es 404/Not Found del endpoint v1 → instrucción clara para habilitar API
+                if _is_v1_404_text(txt):
+                    msg = ("No se pudieron enviar notificaciones (FCM v1 404). "
+                           "Habilita 'Firebase Cloud Messaging API (V1)' para el proyecto "
+                           f"'{project_info['id']}'. Abre este enlace y pulsa 'Enable':\n{_firestore_api_hint()}")
+                    error(ventana, "FCM v1 no habilitado", msg)
+
+                    # ❷ Fallback legacy si hay server key
+                    if LEGACY_KEY and send_legacy(
+                        token,
+                        "📩 Nuevo mensaje pendiente",
+                        cuerpo,
+                        {"accion": "abrir_usuario_screen"},
+                    ):
                         ok += 1
                         notificados.append(doc_id)
                         logging.info("Envío legacy OK para %s", uid)
                         time.sleep(0.05)
                         continue
 
+                # Limpieza de tokens inválidos
                 if "UNREGISTERED" in txt or "INVALID_ARGUMENT" in txt:
                     with_retry(lambda: db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None}))
                     logging.info("fcmToken inválido limpiado para %s", uid)
