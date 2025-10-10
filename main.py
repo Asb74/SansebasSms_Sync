@@ -280,35 +280,67 @@ def crear_mensajes_para_todos():
 
 
 def _crear_mensajes_para_todos_bg(mensaje: str) -> None:
-    logging.info("Creando mensajes para usuarios con Mensaje=True")
+    """
+    Crea documentos en Mensajes para todos los usuarios con Mensaje=True
+    usando escrituras en lote (batch) para evitar 504 Deadline Exceeded.
+    """
+    logging.info("Creando mensajes (batch) para usuarios con Mensaje=True")
     try:
         usuarios = with_retry(
-            lambda: db.collection("UsuariosAutorizados").where(filter=FieldFilter("Mensaje", "==", True)).get()
+            lambda: db.collection("UsuariosAutorizados").where(
+                filter=FieldFilter("Mensaje", "==", True)
+            ).get()
         )
+
         if not usuarios:
             info(ventana, "Sin usuarios", "No hay usuarios con 'Mensaje = true'.")
             return
 
         ahora = datetime.datetime.now()
-        count = 0
+        total = 0
+        batch_size = 400  # seguro por debajo del límite (500)
+
+        batch = db.batch()
+        en_batch = 0
+
+        logging.info("Usuarios a procesar: %d", len(usuarios))
+
         for usuario in usuarios:
             uid = usuario.id
-            data = usuario.to_dict() or {}
-            telefono = data.get("Telefono", "")
-            doc_id = f"{uid}_{ahora.strftime('%Y-%m-%dT%H:%M:%S.%f')}"
-            doc = {
+            udata = usuario.to_dict() or {}
+            telefono = udata.get("Telefono", "")
+
+            # id legible y único
+            doc_id = f"{uid}_{ahora.strftime('%Y-%m-%dT%H-%M-%S-%f')}"
+            doc_ref = db.collection("Mensajes").document(doc_id)
+            payload = {
                 "estado": "Pendiente",
                 "fechaHora": ahora,
                 "mensaje": mensaje,
                 "telefono": telefono,
                 "uid": uid,
             }
-            with_retry(lambda doc=doc, doc_id=doc_id: db.collection("Mensajes").document(doc_id).set(doc))
-            count += 1
 
-        info(ventana, "Éxito", f"✅ Se han creado mensajes para {count} usuarios.")
-    except Exception as e:  # noqa: BLE001
-        logging.exception("No se pudieron crear los mensajes")
+            batch.set(doc_ref, payload)
+            en_batch += 1
+            total += 1
+
+            if en_batch >= batch_size:
+                with_retry(batch.commit)
+                logging.info("Batch de %d mensajes confirmado (acumulado=%d)", en_batch, total)
+                # nuevo batch y pequeña pausa para aliviar presión de red
+                batch = db.batch()
+                en_batch = 0
+                time.sleep(0.8)
+
+        # commit final si queda algo pendiente
+        if en_batch:
+            with_retry(batch.commit)
+            logging.info("Batch final de %d mensajes confirmado (total=%d)", en_batch, total)
+
+        info(ventana, "Éxito", f"✅ Se han creado mensajes para {total} usuarios.")
+    except Exception as e:
+        logging.exception("Error creando mensajes en lote")
         error(ventana, "Error", f"No se pudieron crear los mensajes: {e}")
 
 # Funciones de sincronización (descargar, subir, etc.)
