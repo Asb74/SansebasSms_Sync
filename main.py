@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import firebase_admin
-from firebase_admin import credentials, firestore, messaging
+from firebase_admin import credentials, exceptions, firestore, messaging
 import pandas as pd
 import datetime
 import os
@@ -13,6 +13,7 @@ from GestionMensajes import abrir_gestion_mensajes
 from GenerarMensajes import abrir_generar_mensajes
 from decimal import Decimal
 from typing import Optional
+from google.api_core import exceptions as gcloud_exceptions
 from google.cloud.firestore_v1.base_query import FieldFilter
 import logging
 import threading
@@ -156,7 +157,113 @@ def get_doc_safe(doc_ref):
     return None
 
 
+def diagnosticar_fcm() -> None:
+    try:
+        current_project = project_info.get("id")
+        app_name = firebase_admin.get_app().name
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("No se pudo obtener información de Firebase para diagnóstico")
+        if ventana is not None:
+            error(ventana, "Diagnóstico FCM", f"No se pudo obtener información: {exc}")
+        return
+
+    logging.info("Diagnóstico FCM - Project ID (JSON): %s", current_project)
+    logging.info("Diagnóstico FCM - App Name: %s", app_name)
+    if ventana is not None:
+        info(
+            ventana,
+            "Diagnóstico FCM",
+            f"Project ID (JSON): {current_project}\nApp Name: {app_name}",
+        )
+
+    try:
+        candidatos = with_retry(
+            lambda: db.collection("UsuariosAutorizados")
+            .where(filter=FieldFilter("fcmToken", "!=", None))
+            .limit(1)
+            .get()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logging.exception("No se pudo buscar tokens para diagnóstico")
+        if ventana is not None:
+            warn(ventana, "Diagnóstico FCM", f"No se pudo buscar tokens: {exc}")
+        return
+
+    if not candidatos:
+        logging.warning("Diagnóstico FCM: no se encontraron usuarios con fcmToken")
+        if ventana is not None:
+            warn(ventana, "Diagnóstico FCM", "No se encontró ningún usuario con fcmToken.")
+        return
+
+    usuario = candidatos[0]
+    datos = usuario.to_dict() or {}
+    token = datos.get("fcmToken")
+    uid = usuario.id
+
+    if not _is_valid_fcm_token(token):
+        logging.warning("Diagnóstico FCM: token inválido para %s", uid)
+        if ventana is not None:
+            warn(ventana, "Diagnóstico FCM", "El token obtenido no es válido.")
+        return
+
+    mensaje = messaging.Message(
+        token=token,
+        notification=messaging.Notification(
+            title="🔍 Diagnóstico FCM",
+            body="Mensaje de prueba desde Sansebassms Sync",
+        ),
+        data={"diagnostico": "true"},
+    )
+
+    try:
+        respuesta = with_retry(lambda: messaging.send(mensaje, dry_run=False))
+        logging.info("Diagnóstico FCM: mensaje enviado a %s (%s)", uid, respuesta)
+        if ventana is not None:
+            info(
+                ventana,
+                "Diagnóstico FCM",
+                "✅ Mensaje de prueba enviado correctamente.",
+            )
+    except exceptions.UnregisteredError:
+        logging.warning("TOKEN INVALIDO/DE OTRO PROYECTO")
+        try:
+            with_retry(
+                lambda: db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None})
+            )
+            logging.info("Diagnóstico FCM: fcmToken limpiado para %s", uid)
+        except Exception:  # noqa: BLE001
+            logging.exception("No se pudo limpiar el token inválido para %s", uid)
+        if ventana is not None:
+            warn(
+                ventana,
+                "Diagnóstico FCM",
+                "El token no es válido. Se ha marcado para regenerar.",
+            )
+    except Exception as exc:  # noqa: BLE001
+        texto = str(exc)
+        if (
+            isinstance(exc, gcloud_exceptions.NotFound)
+            or ("404" in texto and "/v1" in texto)
+        ):
+            logging.error("Diagnóstico FCM: %s", texto, exc_info=True)
+            if ventana is not None:
+                error(
+                    ventana,
+                    "Diagnóstico FCM",
+                    "PROJECT_ID INCORRECTO O FCM NO HABILITADO",
+                )
+        else:
+            logging.exception("Error al enviar mensaje de diagnóstico")
+            if ventana is not None:
+                error(
+                    ventana,
+                    "Diagnóstico FCM",
+                    f"Error al enviar mensaje de prueba: {exc}",
+                )
+
+
 def enviar_notificaciones_push():
+    logging.info("Proyecto activo: %s", project_info["id"])
     logging.info("Enviando notificaciones una a una (sin batch)")
     try:
         pendientes = with_retry(
@@ -532,6 +639,7 @@ tk.Button(
     width=40,
     bg="lightgreen",
 ).pack(pady=5)
+tk.Button(frame, text="🧪 Diagnosticar FCM", command=lambda: run_bg(diagnosticar_fcm), height=2, width=40).pack(pady=5)
 tk.Button(frame, text="👥 Gestionar Usuarios", command=lambda: abrir_gestion_usuarios(db), height=2, width=40, bg="lightyellow").pack(pady=5)
 tk.Button(frame, text="📜 Gestionar Mensajes", command=lambda: abrir_gestion_mensajes(db), height=2, width=40).pack(pady=5)
 tk.Button(frame, text="Peticiones de Días Libres", command=lambda: abrir_gestion_peticiones(db), height=2, width=40).pack(pady=5)
