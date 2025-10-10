@@ -156,113 +156,88 @@ def get_doc_safe(doc_ref):
     return None
 
 
-def _split_chunks(seq, size):
-    for i in range(0, len(seq), size):
-        yield seq[i:i + size]
-
-
 def enviar_notificaciones_push():
-    logging.info("Enviando notificaciones mediante Admin SDK")
+    logging.info("Enviando notificaciones una a una (sin batch)")
     try:
         pendientes = with_retry(
             lambda: db.collection("Mensajes").where(
                 filter=FieldFilter("estado", "==", "Pendiente")
             ).get()
         )
-
         if not pendientes:
             info(ventana, "Notificaciones", "No hay mensajes pendientes.")
             return
 
-        notificados: set[str] = set()
+        # cargar lista de ya notificados
+        notificados: list[str] = []
         if os.path.exists(archivo_notificados):
             with open(archivo_notificados, "r", encoding="utf-8") as f:
-                try:
-                    notificados = set(json.load(f))
-                except Exception:
-                    logging.exception("No se pudo leer archivo de notificados, se reiniciará")
-                    notificados = set()
+                notificados = json.load(f)
 
-        to_send: list[tuple[str, str, messaging.Message]] = []
-
+        # preparar destinatarios
+        objetivos = []  # (doc_id, uid, token, mensaje)
         for doc in pendientes:
             if doc.id in notificados:
                 continue
-
-            datos = doc.to_dict() or {}
-            uid = datos.get("uid")
-            mensaje = datos.get("mensaje", "Tienes un mensaje pendiente")
-
+            data = doc.to_dict() or {}
+            uid = data.get("uid")
+            cuerpo = data.get("mensaje", "Tienes un mensaje pendiente")
             if not uid:
-                logging.debug("Documento %s sin uid, se omite", doc.id)
+                logging.warning("Documento %s sin uid; se omite", doc.id)
                 continue
 
-            usuario_doc = get_doc_safe(db.collection("UsuariosAutorizados").document(uid))
-            if usuario_doc is None:
+            snap = get_doc_safe(db.collection("UsuariosAutorizados").document(uid))
+            if snap is None:
                 logging.warning("Usuario %s no encontrado al enviar push", uid)
                 continue
-
-            token = (usuario_doc.to_dict() or {}).get("fcmToken")
-            if not _is_valid_fcm_token(token):
-                logging.warning("Token FCM vacío/invalid para %s, se omite.", uid)
+            token = (snap.to_dict() or {}).get("fcmToken")
+            if not token or not isinstance(token, str):
+                logging.warning("Token FCM vacío/invalid para %s; se omite", uid)
                 continue
 
-            mensaje_push = messaging.Message(
-                token=_safe_str(token),
-                notification=messaging.Notification(
-                    title="📩 Nuevo mensaje pendiente",
-                    body=mensaje,
-                ),
-                data={"accion": "abrir_usuario_screen"},
-            )
-            to_send.append((doc.id, uid, mensaje_push))
+            objetivos.append((doc.id, uid, token, cuerpo))
 
-        if not to_send:
+        if not objetivos:
             info(ventana, "Notificaciones", "No hay destinatarios válidos.")
             return
 
         ok = 0
-        total = len(to_send)
+        total = len(objetivos)
+        logging.info("Destinatarios a enviar: %d", total)
 
-        for chunk in _split_chunks(to_send, 400):
-            docs_uids_msgs = list(chunk)
-            mensajes = [m for _, _, m in docs_uids_msgs]
+        for doc_id, uid, token, cuerpo in objetivos:
 
-            def _do_send():
-                return messaging.send_all(mensajes, dry_run=False)
+            def _send_one():
+                msg = messaging.Message(
+                    token=token,
+                    notification=messaging.Notification(
+                        title="📩 Nuevo mensaje pendiente",
+                        body=cuerpo
+                    ),
+                    data={"accion": "abrir_usuario_screen"}
+                )
+                # devuelve message_id si OK; lanza excepción si falla
+                return messaging.send(msg, dry_run=False)
 
-            res = with_retry(_do_send)
-            exitos_lote = 0
-
-            for idx, resp in enumerate(res.responses):
-                doc_id, uid, _ = docs_uids_msgs[idx]
-                if resp.success:
-                    ok += 1
-                    exitos_lote += 1
-                    notificados.add(doc_id)
-                else:
-                    err = resp.exception
-                    logging.error("Error enviando a %s: %s", uid, err)
-                    detalle = str(err)
-                    if "UNREGISTERED" in detalle or "INVALID_ARGUMENT" in detalle:
-                        with_retry(
-                            lambda: db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None})
-                        )
-                        logging.info("fcmToken inválido limpiado para %s", uid)
-
-            logging.info(
-                "Lote procesado: %s/%s envíos exitosos",
-                exitos_lote,
-                len(docs_uids_msgs),
-            )
-            time.sleep(0.5)
+            try:
+                _ = with_retry(_send_one)
+                ok += 1
+                notificados.append(doc_id)
+            except Exception as err:
+                txt = str(err)
+                logging.error("Error enviando a %s: %s", uid, txt, exc_info=True)
+                if "UNREGISTERED" in txt or "INVALID_ARGUMENT" in txt:
+                    with_retry(lambda: db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None}))
+                    logging.info("fcmToken inválido limpiado para %s", uid)
+            finally:
+                time.sleep(0.05)  # 50ms para no saturar
 
         with open(archivo_notificados, "w", encoding="utf-8") as f:
-            json.dump(sorted(notificados), f, ensure_ascii=False, indent=2)
+            json.dump(notificados, f, ensure_ascii=False, indent=2)
 
         info(ventana, "Resultado", f"✅ Notificaciones enviadas: {ok}/{total}")
-    except Exception as e:  # noqa: BLE001
-        logging.exception("No se pudieron enviar notificaciones")
+    except Exception as e:
+        logging.exception("Fallo al enviar notificaciones")
         error(ventana, "Error", f"No se pudieron enviar notificaciones: {e}")
 
 def crear_mensajes_para_todos():
