@@ -1,20 +1,16 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, messaging
 import pandas as pd
 import datetime
 import os
 import json
-import requests
 from dateutil import parser
 from PIL import Image, ImageTk
-from google.auth.transport.requests import Request
-from google.oauth2 import service_account
 from GestionUsuarios import abrir_gestion_usuarios
 from GestionMensajes import abrir_gestion_mensajes
 from GenerarMensajes import abrir_generar_mensajes
-import re
 from decimal import Decimal
 from typing import Optional
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -56,17 +52,9 @@ def _safe_str(v) -> Optional[str]:
     return s if s else None
 
 
-_FCM_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-:.]{100,}$")
-
-
 def _is_valid_fcm_token(token: Optional[str]) -> bool:
-    if not token:
-        return False
-    if not isinstance(token, str):
-        token = _safe_str(token)
-        if not token:
-            return False
-    return bool(_FCM_TOKEN_RE.match(token))
+    token = _safe_str(token)
+    return bool(token)
 
 
 ventana: Optional[tk.Tk] = None
@@ -121,6 +109,7 @@ try:
     with open(credenciales_dinamicas["ruta"], "r", encoding="utf-8") as f:
         data = json.load(f)
         project_info["id"] = data.get("project_id")
+        logging.info("Firebase project id: %s", project_info["id"])
 
     cred = credentials.Certificate(credenciales_dinamicas["ruta"])
     firebase_admin.initialize_app(cred)
@@ -157,18 +146,6 @@ def with_retry(fn, *, tries: int = 3, base: float = 0.5, cap: float = 5.0):
         raise last_exception
 
 
-def obtener_token_oauth():
-    try:
-        creds = service_account.Credentials.from_service_account_file(
-            credenciales_dinamicas["ruta"],
-            scopes=["https://www.googleapis.com/auth/firebase.messaging"]
-        )
-        creds.refresh(Request())
-        return creds.token
-    except Exception as e:
-        raise RuntimeError(f"No se pudo obtener el token de acceso: {e}") from e
-
-
 def get_doc_safe(doc_ref):
     try:
         doc = with_retry(doc_ref.get)
@@ -179,25 +156,36 @@ def get_doc_safe(doc_ref):
     return None
 
 
+def _split_chunks(seq, size):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
+
 def enviar_notificaciones_push():
-    logging.info("Iniciando envío de notificaciones push")
+    logging.info("Enviando notificaciones mediante Admin SDK")
     try:
-        snapshot = with_retry(
-            lambda: db.collection("Mensajes").where(filter=FieldFilter("estado", "==", "Pendiente")).get()
+        pendientes = with_retry(
+            lambda: db.collection("Mensajes").where(
+                filter=FieldFilter("estado", "==", "Pendiente")
+            ).get()
         )
-        if not snapshot:
+
+        if not pendientes:
             info(ventana, "Notificaciones", "No hay mensajes pendientes.")
             return
 
-        token_oauth = obtener_token_oauth()
-        notificados: list[str] = []
+        notificados: set[str] = set()
         if os.path.exists(archivo_notificados):
             with open(archivo_notificados, "r", encoding="utf-8") as f:
-                notificados = json.load(f)
+                try:
+                    notificados = set(json.load(f))
+                except Exception:
+                    logging.exception("No se pudo leer archivo de notificados, se reiniciará")
+                    notificados = set()
 
-        nuevos: list[str] = []
+        to_send: list[tuple[str, str, messaging.Message]] = []
 
-        for doc in snapshot:
+        for doc in pendientes:
             if doc.id in notificados:
                 continue
 
@@ -214,55 +202,65 @@ def enviar_notificaciones_push():
                 logging.warning("Usuario %s no encontrado al enviar push", uid)
                 continue
 
-            usuario_data = usuario_doc.to_dict() or {}
-            token = usuario_data.get("fcmToken")
+            token = (usuario_doc.to_dict() or {}).get("fcmToken")
             if not _is_valid_fcm_token(token):
-                logging.warning("Token FCM inválido para %s, se omite.", uid)
+                logging.warning("Token FCM vacío/invalid para %s, se omite.", uid)
                 continue
 
-            payload = {
-                "message": {
-                    "token": token,
-                    "notification": {
-                        "title": "📩 Nuevo mensaje pendiente",
-                        "body": mensaje
-                    },
-                    "data": {
-                        "accion": "abrir_usuario_screen"
-                    }
-                }
-            }
+            mensaje_push = messaging.Message(
+                token=_safe_str(token),
+                notification=messaging.Notification(
+                    title="📩 Nuevo mensaje pendiente",
+                    body=mensaje,
+                ),
+                data={"accion": "abrir_usuario_screen"},
+            )
+            to_send.append((doc.id, uid, mensaje_push))
 
-            headers = {
-                "Authorization": f"Bearer {token_oauth}",
-                "Content-Type": "application/json",
-            }
+        if not to_send:
+            info(ventana, "Notificaciones", "No hay destinatarios válidos.")
+            return
 
-            url = f"https://fcm.googleapis.com/v1/projects/{project_info['id']}/messages:send"
+        ok = 0
+        total = len(to_send)
 
-            def _send():
-                response = requests.post(url, headers=headers, json=payload, timeout=10)
-                response.raise_for_status()
-                return response
+        for chunk in _split_chunks(to_send, 400):
+            docs_uids_msgs = list(chunk)
+            mensajes = [m for _, _, m in docs_uids_msgs]
 
-            try:
-                with_retry(_send)
-                nuevos.append(doc.id)
-            except requests.HTTPError as http_err:
-                logging.error("Error HTTP al enviar a %s: %s", uid, http_err, exc_info=True)
-                if http_err.response is not None and http_err.response.status_code == 400 and "INVALID_ARGUMENT" in http_err.response.text:
-                    with_retry(lambda: db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None}))
-                    logging.info("fcmToken inválido limpiado para %s", uid)
-            except Exception:
-                logging.exception("Error al enviar notificación a %s", uid)
+            def _do_send():
+                return messaging.send_all(mensajes, dry_run=False)
 
-        if nuevos:
-            notificados.extend(nuevos)
-            with open(archivo_notificados, "w", encoding="utf-8") as f:
-                json.dump(notificados, f)
-            logging.info("Notificaciones marcadas como enviadas: %s", len(nuevos))
+            res = with_retry(_do_send)
+            exitos_lote = 0
 
-        info(ventana, "Resultado", f"✅ Notificaciones enviadas: {len(nuevos)}")
+            for idx, resp in enumerate(res.responses):
+                doc_id, uid, _ = docs_uids_msgs[idx]
+                if resp.success:
+                    ok += 1
+                    exitos_lote += 1
+                    notificados.add(doc_id)
+                else:
+                    err = resp.exception
+                    logging.error("Error enviando a %s: %s", uid, err)
+                    detalle = str(err)
+                    if "UNREGISTERED" in detalle or "INVALID_ARGUMENT" in detalle:
+                        with_retry(
+                            lambda: db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None})
+                        )
+                        logging.info("fcmToken inválido limpiado para %s", uid)
+
+            logging.info(
+                "Lote procesado: %s/%s envíos exitosos",
+                exitos_lote,
+                len(docs_uids_msgs),
+            )
+            time.sleep(0.5)
+
+        with open(archivo_notificados, "w", encoding="utf-8") as f:
+            json.dump(sorted(notificados), f, ensure_ascii=False, indent=2)
+
+        info(ventana, "Resultado", f"✅ Notificaciones enviadas: {ok}/{total}")
     except Exception as e:  # noqa: BLE001
         logging.exception("No se pudieron enviar notificaciones")
         error(ventana, "Error", f"No se pudieron enviar notificaciones: {e}")
