@@ -1,5 +1,12 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, simpledialog, ttk, messagebox
+import logging
+from logging_setup import install_global_excepthook
+install_global_excepthook()
+logging.info("SansebasSms Sync iniciado")
+from ui_safety import info, error
+from thread_utils import run_bg
+logger = logging.getLogger(__name__)
 import firebase_admin
 from firebase_admin import credentials, firestore
 import pandas as pd
@@ -7,6 +14,7 @@ import datetime
 import os
 import json
 import requests
+import time
 from dateutil import parser
 from PIL import Image, ImageTk
 from google.auth.transport.requests import Request
@@ -22,7 +30,9 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 try:
     import tkcalendar  # noqa: F401
 except Exception:
-    print("⚠️ Instale tkcalendar para habilitar selectores de fecha: pip install tkcalendar")
+    logger.warning(
+        "Instale tkcalendar para habilitar selectores de fecha: pip install tkcalendar"
+    )
 
 
 def _safe_str(v) -> Optional[str]:
@@ -64,11 +74,103 @@ project_info = {"id": None}
 carpeta_excel = {"ruta": None}
 archivo_notificados = "notificados.json"
 
+ventana: Optional[tk.Misc] = None
+estado: Optional[tk.StringVar] = None
+
+
+def _get_root() -> Optional[tk.Misc]:
+    if ventana is None:
+        return None
+    try:
+        return ventana.winfo_toplevel()
+    except Exception:
+        return ventana
+
+
+def _set_estado_async(texto: str) -> None:
+    root_ref = _get_root()
+    if root_ref is None or estado is None:
+        return
+    root_ref.after(0, lambda: estado.set(texto))
+
+
+def with_retry(fn, tries: int = 3, base: float = 0.5, cap: float = 5.0):
+    """Ejecuta `fn` con reintentos exponenciales."""
+
+    last_exc: Optional[Exception] = None
+    for intento in range(1, tries + 1):
+        try:
+            return fn()
+        except Exception as exc:  # pragma: no cover - logging side effect
+            last_exc = exc
+            if intento >= tries:
+                logger.exception("Operación falló tras %s intentos", tries)
+                raise
+            delay = min(cap, base * (2 ** (intento - 1)))
+            logger.warning(
+                "Intento %s/%s fallido, reintentando en %.2f s", intento, tries, delay, exc_info=exc
+            )
+            time.sleep(delay)
+    if last_exc is not None:
+        raise last_exc
+
+
+def get_doc_safe(doc_ref):
+    try:
+        doc = doc_ref.get()
+    except Exception as exc:
+        logger.exception("Error al obtener documento %s", getattr(doc_ref, "id", doc_ref))
+        return None
+    if not getattr(doc, "exists", False):
+        return None
+    try:
+        return doc.to_dict() or {}
+    except Exception as exc:
+        logger.exception("Error al convertir documento %s a dict", getattr(doc, "id", doc_ref))
+        return None
+
+
+def iter_collection_safe(col_ref):
+    try:
+        for doc in col_ref.stream():
+            yield doc
+    except Exception:
+        logger.exception("Error al iterar colección %s", getattr(col_ref, "id", col_ref))
+
+
+def enviar_fcm(uid: str, token: Optional[str], token_oauth: str, *, notification: dict, data: Optional[dict] = None) -> bool:
+    if not _is_valid_fcm_token(token):
+        logger.warning("Token FCM inválido para %s, se omite", uid)
+        return False
+
+    payload = {"message": {"token": token, "notification": notification}}
+    if data:
+        payload["message"]["data"] = data
+
+    headers = {
+        "Authorization": f"Bearer {token_oauth}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"https://fcm.googleapis.com/v1/projects/{project_info['id']}/messages:send"
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+    except Exception:
+        logger.exception("Error enviando notificación a %s", uid)
+        return False
+
+    if response.status_code == 200:
+        logger.info("Notificación enviada a %s", uid)
+        return True
+
+    logger.error("Error al enviar a %s: %s", uid, response.text)
+    return False
+
 # Inicializar Firebase
 try:
     if not os.path.exists(credenciales_dinamicas["ruta"]):
-        root = tk.Tk()
-        root.withdraw()
+        root_dialog = tk.Tk()
+        root_dialog.withdraw()
         nueva_ruta = filedialog.askopenfilename(
             title="Selecciona archivo de credenciales",
             filetypes=[("Archivos JSON", "*.json")]
@@ -78,21 +180,28 @@ try:
                 "Credenciales",
                 "No se seleccionó archivo de credenciales. La aplicación se cerrará."
             )
-            root.destroy()
-            exit()
+            root_dialog.destroy()
+            raise SystemExit(1)
         credenciales_dinamicas["ruta"] = nueva_ruta
-        root.destroy()
+        root_dialog.destroy()
 
-    with open(credenciales_dinamicas["ruta"], "r") as f:
+    with open(credenciales_dinamicas["ruta"], "r", encoding="utf-8") as f:
         data = json.load(f)
         project_info["id"] = data.get("project_id")
 
     cred = credentials.Certificate(credenciales_dinamicas["ruta"])
     firebase_admin.initialize_app(cred)
     db = firestore.client()
-except Exception as e:
-    print(f"❌ Error al inicializar Firebase: {e}")
-    exit()
+except Exception as exc:
+    logger.exception("Error al inicializar Firebase")
+    root_dialog = tk.Tk()
+    root_dialog.withdraw()
+    messagebox.showerror(
+        "Firebase",
+        f"No se pudo inicializar Firebase: {exc}"
+    )
+    root_dialog.destroy()
+    raise SystemExit(1)
 
 
 def abrir_gestion_peticiones(db):
@@ -111,120 +220,126 @@ def obtener_token_oauth():
         )
         creds.refresh(Request())
         return creds.token
-    except Exception as e:
-        raise Exception(f"No se pudo obtener el token de acceso: {e}")
+    except Exception as exc:
+        logger.exception("No se pudo obtener el token de acceso")
+        raise RuntimeError(f"No se pudo obtener el token de acceso: {exc}") from exc
 
 def enviar_notificaciones_push():
-    try:
-        snapshot = db.collection("Mensajes").where(filter=FieldFilter("estado", "==", "Pendiente")).get()
-        if not snapshot:
-            messagebox.showinfo("Notificaciones", "No hay mensajes pendientes.")
-            return
+    root = _get_root()
 
-        token_oauth = obtener_token_oauth()
-        notificados = []
-        if os.path.exists(archivo_notificados):
-            with open(archivo_notificados, "r") as f:
-                notificados = json.load(f)
+    def worker():
+        try:
+            snapshot = with_retry(
+                lambda: db.collection("Mensajes").where(
+                    filter=FieldFilter("estado", "==", "Pendiente")
+                ).get()
+            )
+            if not snapshot:
+                info(root, "Notificaciones", "No hay mensajes pendientes.")
+                return
 
-        nuevos = []
+            token_oauth = obtener_token_oauth()
+            notificados = []
+            if os.path.exists(archivo_notificados):
+                with open(archivo_notificados, "r", encoding="utf-8") as f:
+                    notificados = json.load(f)
 
-        for doc in snapshot:
-            if doc.id in notificados:
-                continue
+            nuevos: list[str] = []
 
-            datos = doc.to_dict()
-            uid = datos.get("uid")
-            mensaje = datos.get("mensaje", "Tienes un mensaje pendiente")
+            for doc in snapshot:
+                if doc.id in notificados:
+                    continue
 
-            if not uid:
-                continue
+                datos = doc.to_dict() or {}
+                uid = datos.get("uid")
+                mensaje = datos.get("mensaje", "Tienes un mensaje pendiente")
 
-            usuario_doc = db.collection("UsuariosAutorizados").document(uid).get()
-            if not usuario_doc.exists:
-                continue
+                if not uid:
+                    continue
 
-            usuario_data = usuario_doc.to_dict()
-            token = usuario_data.get("fcmToken")
-            if not _is_valid_fcm_token(token):
-                print(f"⚠️ Token FCM inválido para {uid}, se omite.")
-                continue
+                usuario_data = get_doc_safe(db.collection("UsuariosAutorizados").document(uid))
+                if not usuario_data:
+                    logger.warning("Usuario %s no encontrado para envío FCM", uid)
+                    continue
 
-            payload = {
-                "message": {
-                    "token": token,
-                    "notification": {
+                token = usuario_data.get("fcmToken")
+                enviado = enviar_fcm(
+                    uid,
+                    token,
+                    token_oauth,
+                    notification={
                         "title": "📩 Nuevo mensaje pendiente",
-                        "body": mensaje
+                        "body": mensaje,
                     },
-                    "data": {
-                        "accion": "abrir_usuario_screen"
-                    }
-                }
-            }
+                    data={"accion": "abrir_usuario_screen"},
+                )
 
-            headers = {
-                "Authorization": f"Bearer {token_oauth}",
-                "Content-Type": "application/json"
-            }
-
-            url = f"https://fcm.googleapis.com/v1/projects/{project_info['id']}/messages:send"
-            response = requests.post(url, headers=headers, json=payload)
-
-            if response.status_code == 200:
-                nuevos.append(doc.id)
-            else:
-                print(f"❌ Error al enviar a {uid}: {response.text}")
-                if response.status_code == 400 and "INVALID_ARGUMENT" in response.text:
+                if enviado:
+                    nuevos.append(doc.id)
+                elif token and not _is_valid_fcm_token(token):
                     db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None})
-                    print(f"🧹 fcmToken inválido limpiado para {uid}")
+                    logger.info("Token FCM inválido limpiado para %s", uid)
 
-        if nuevos:
-            notificados.extend(nuevos)
-            with open(archivo_notificados, "w") as f:
-                json.dump(notificados, f)
+            if nuevos:
+                notificados.extend(nuevos)
+                with open(archivo_notificados, "w", encoding="utf-8") as f:
+                    json.dump(notificados, f)
 
-        messagebox.showinfo("Resultado", f"✅ Notificaciones enviadas: {len(nuevos)}")
-    except Exception as e:
-        messagebox.showerror("Error", f"No se pudieron enviar notificaciones: {e}")
+            info(root, "Resultado", f"✅ Notificaciones enviadas: {len(nuevos)}")
+        except Exception as exc:
+            logger.exception("No se pudieron enviar notificaciones")
+            error(root, "Error", f"No se pudieron enviar notificaciones: {exc}")
+
+    run_bg(worker, _thread_name="enviar_notificaciones_push")
 
 def crear_mensajes_para_todos():
     mensaje = simpledialog.askstring("Nuevo mensaje", "Escribe el mensaje que deseas enviar a los usuarios:", parent=ventana)
     if not mensaje:
         return
 
-    try:
-        usuarios = db.collection("UsuariosAutorizados").where(filter=FieldFilter("Mensaje", "==", True)).get()
-        if not usuarios:
-            messagebox.showinfo("Sin usuarios", "No hay usuarios con 'Mensaje = true'.")
-            return
+    root = _get_root()
 
-        for usuario in usuarios:
-            uid = usuario.id
-            data = usuario.to_dict()
-            telefono = data.get("Telefono", "")
+    def worker():
+        try:
+            usuarios = with_retry(
+                lambda: db.collection("UsuariosAutorizados").where(
+                    filter=FieldFilter("Mensaje", "==", True)
+                ).get()
+            )
+            if not usuarios:
+                info(root, "Sin usuarios", "No hay usuarios con 'Mensaje = true'.")
+                return
 
-            ahora = datetime.datetime.now()
-            doc_id = f"{uid}_{ahora.strftime('%Y-%m-%dT%H:%M:%S.%f')}"
-            doc = {
-                "estado": "Pendiente",
-                "fechaHora": ahora,
-                "mensaje": mensaje,
-                "telefono": telefono,
-                "uid": uid
-            }
-            db.collection("Mensajes").document(doc_id).set(doc)
+            for usuario in usuarios:
+                uid = usuario.id
+                data = usuario.to_dict() or {}
+                telefono = data.get("Telefono", "")
 
-        messagebox.showinfo("Éxito", f"✅ Se han creado mensajes para {len(usuarios)} usuarios.")
-    except Exception as e:
-        messagebox.showerror("Error", f"No se pudieron crear los mensajes: {e}")
+                ahora = datetime.datetime.now()
+                doc_id = f"{uid}_{ahora.strftime('%Y-%m-%dT%H:%M:%S.%f')}"
+                doc = {
+                    "estado": "Pendiente",
+                    "fechaHora": ahora,
+                    "mensaje": mensaje,
+                    "telefono": telefono,
+                    "uid": uid,
+                }
+                db.collection("Mensajes").document(doc_id).set(doc)
+
+            info(root, "Éxito", f"✅ Se han creado mensajes para {len(usuarios)} usuarios.")
+        except Exception as exc:
+            logger.exception("No se pudieron crear los mensajes automáticos")
+            error(root, "Error", f"No se pudieron crear los mensajes: {exc}")
+
+    run_bg(worker, _thread_name="crear_mensajes_para_todos")
 
 # Funciones de sincronización (descargar, subir, etc.)
 def seleccionar_carpeta_destino():
     carpeta = filedialog.askdirectory()
     if carpeta:
         carpeta_excel["ruta"] = carpeta
-        estado.set(f"📁 Carpeta de destino seleccionada:\n{carpeta}")
+        if estado is not None:
+            estado.set(f"📁 Carpeta de destino seleccionada:\n{carpeta}")
 
 def limpiar_fechas(doc):
     limpio = {}
@@ -267,100 +382,129 @@ def convertir_desde_tipos(dic, tipos):
 
 def descargar_todo():
     if not carpeta_excel["ruta"]:
-        messagebox.showerror("Carpeta no seleccionada", "Debes seleccionar una carpeta de destino primero.")
+        error(_get_root(), "Carpeta no seleccionada", "Debes seleccionar una carpeta de destino primero.")
         return
-    try:
-        colecciones = db.collections()
-        for coleccion in colecciones:
-            nombre = coleccion.id
-            estado.set(f"⏳ Descargando: {nombre}...")
-            ventana.update_idletasks()
+    root = _get_root()
 
-            docs = coleccion.stream()
-            datos = []
-            tipos = {}
+    def worker():
+        try:
+            colecciones = list(db.collections())
+            if not colecciones:
+                info(root, "Descarga", "No se encontraron colecciones en Firestore.")
+                _set_estado_async("Sin colecciones para descargar.")
+                return
 
-            for doc in docs:
-                raw = doc.to_dict()
-                limpio = limpiar_fechas(raw)
-                limpio["_id"] = doc.id
-                datos.append(limpio)
-                for k, v in raw.items():
-                    tipos[k] = tipo_de_valor(v)
+            for coleccion in colecciones:
+                nombre = getattr(coleccion, "id", "coleccion")
+                _set_estado_async(f"⏳ Descargando: {nombre}...")
 
-            if datos:
-                ruta_archivo = os.path.join(carpeta_excel["ruta"], f"{nombre}.xlsx")
-                with pd.ExcelWriter(ruta_archivo, engine='openpyxl') as writer:
-                    pd.DataFrame(datos).to_excel(writer, sheet_name="datos", index=False)
-                    pd.DataFrame([{"campo": k, "tipo": v} for k, v in tipos.items()]).to_excel(writer, sheet_name="tipos", index=False)
+                datos: list[dict] = []
+                tipos: dict[str, str] = {}
 
-        messagebox.showinfo("Éxito", "Todas las colecciones fueron exportadas.")
-        estado.set("✅ Descarga completada.")
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
-        estado.set("❌ Error al descargar.")
+                for doc in iter_collection_safe(coleccion):
+                    raw = doc.to_dict() or {}
+                    limpio = limpiar_fechas(raw)
+                    limpio["_id"] = doc.id
+                    datos.append(limpio)
+                    for k, v in raw.items():
+                        tipos[k] = tipo_de_valor(v)
+
+                if datos:
+                    ruta_archivo = os.path.join(carpeta_excel["ruta"], f"{nombre}.xlsx")
+                    with pd.ExcelWriter(ruta_archivo, engine="openpyxl") as writer:
+                        pd.DataFrame(datos).to_excel(writer, sheet_name="datos", index=False)
+                        pd.DataFrame([
+                            {"campo": k, "tipo": v} for k, v in tipos.items()
+                        ]).to_excel(writer, sheet_name="tipos", index=False)
+
+            info(root, "Éxito", "Todas las colecciones fueron exportadas.")
+            _set_estado_async("✅ Descarga completada.")
+        except Exception as exc:
+            logger.exception("Error al descargar colecciones")
+            error(root, "Error", str(exc))
+            _set_estado_async("❌ Error al descargar.")
+
+    run_bg(worker, _thread_name="descargar_todo")
 
 def subir_archivo():
     archivo = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
     if not archivo:
         return
     try:
-        nombre_coleccion = os.path.splitext(os.path.basename(archivo))[0]
-        df = pd.read_excel(archivo, sheet_name="datos")
-        df_tipos = pd.read_excel(archivo, sheet_name="tipos")
-        tipos_dict = dict(zip(df_tipos["campo"], df_tipos["tipo"]))
+        eliminar_faltantes = bool(eliminar_var.get()) if eliminar_var is not None else True
+    except Exception:
+        eliminar_faltantes = True
 
-        if "_id" not in df.columns:
-            messagebox.showerror("Error", "El archivo no contiene una columna '_id'")
-            return
+    root = _get_root()
 
-        estado.set(f"⬆️ Subiendo: {nombre_coleccion}...")
-        ventana.update_idletasks()
+    def worker():
+        try:
+            nombre_coleccion = os.path.splitext(os.path.basename(archivo))[0]
+            df = pd.read_excel(archivo, sheet_name="datos")
+            df_tipos = pd.read_excel(archivo, sheet_name="tipos")
+            tipos_dict = dict(zip(df_tipos["campo"], df_tipos["tipo"]))
 
-        ids_excel = set()
-        for _, fila in df.iterrows():
-            doc_id = str(fila["_id"])
-            datos_limpios = fila.drop("_id").dropna().to_dict()
-            data = convertir_desde_tipos(datos_limpios, tipos_dict)
-            db.collection(nombre_coleccion).document(doc_id).set(data)
-            ids_excel.add(doc_id)
+            if "_id" not in df.columns:
+                error(root, "Error", "El archivo no contiene una columna '_id'")
+                return
 
-        if eliminar_var.get():
-            docs_firestore = db.collection(nombre_coleccion).stream()
-            for doc in docs_firestore:
-                if doc.id not in ids_excel:
-                    db.collection(nombre_coleccion).document(doc.id).delete()
+            _set_estado_async(f"⬆️ Subiendo: {nombre_coleccion}...")
 
-        messagebox.showinfo("Éxito", f"Archivo '{nombre_coleccion}.xlsx' sincronizado.")
-        estado.set("✅ Subida completada.")
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
-        estado.set("❌ Error al subir archivo.")
+            ids_excel = set()
+            for _, fila in df.iterrows():
+                doc_id = str(fila["_id"])
+                datos_limpios = fila.drop("_id").dropna().to_dict()
+                data = convertir_desde_tipos(datos_limpios, tipos_dict)
+                db.collection(nombre_coleccion).document(doc_id).set(data)
+                ids_excel.add(doc_id)
+
+            if eliminar_faltantes:
+                for doc in iter_collection_safe(db.collection(nombre_coleccion)):
+                    if doc.id not in ids_excel:
+                        db.collection(nombre_coleccion).document(doc.id).delete()
+
+            info(root, "Éxito", f"Archivo '{nombre_coleccion}.xlsx' sincronizado.")
+            _set_estado_async("✅ Subida completada.")
+        except Exception as exc:
+            logger.exception("Error al subir archivo")
+            error(root, "Error", str(exc))
+            _set_estado_async("❌ Error al subir archivo.")
+
+    run_bg(worker, _thread_name="subir_archivo")
 
 def revisar_mensajes():
-    try:
-        notificados = []
-        if os.path.exists(archivo_notificados):
-            with open(archivo_notificados, "r") as f:
-                notificados = json.load(f)
+    root = _get_root()
 
-        nuevos = []
-        snapshot = db.collection("Mensajes").where(filter=FieldFilter("estado", "==", "Pendiente")).get()
-        for doc in snapshot:
-            if doc.id not in notificados:
-                mensaje = doc.to_dict().get("mensaje", "(sin mensaje)")
-                nuevos.append((doc.id, mensaje))
-                messagebox.showinfo("📨 Mensaje nuevo", f"{mensaje}")
-                notificados.append(doc.id)
+    def worker():
+        try:
+            notificados: list[str] = []
+            if os.path.exists(archivo_notificados):
+                with open(archivo_notificados, "r", encoding="utf-8") as f:
+                    notificados = json.load(f)
 
-        if nuevos:
-            with open(archivo_notificados, "w") as f:
-                json.dump(notificados, f)
+            nuevos = []
+            snapshot = with_retry(
+                lambda: db.collection("Mensajes").where(
+                    filter=FieldFilter("estado", "==", "Pendiente")
+                ).get()
+            )
+            for doc in snapshot:
+                if doc.id not in notificados:
+                    mensaje = (doc.to_dict() or {}).get("mensaje", "(sin mensaje)")
+                    nuevos.append((doc.id, mensaje))
+                    info(root, "📨 Mensaje nuevo", f"{mensaje}")
+                    notificados.append(doc.id)
 
-        if not nuevos:
-            messagebox.showinfo("Mensajes", "No hay mensajes pendientes nuevos.")
-    except Exception as e:
-        messagebox.showerror("Error", f"Error al revisar mensajes: {e}")
+            if nuevos:
+                with open(archivo_notificados, "w", encoding="utf-8") as f:
+                    json.dump(notificados, f)
+            else:
+                info(root, "Mensajes", "No hay mensajes pendientes nuevos.")
+        except Exception as exc:
+            logger.exception("Error al revisar mensajes")
+            error(root, "Error", f"Error al revisar mensajes: {exc}")
+
+    run_bg(worker, _thread_name="revisar_mensajes")
 
 # Interfaz
 ventana = tk.Tk()
