@@ -24,7 +24,7 @@ from GestionMensajes import abrir_gestion_mensajes
 from GenerarMensajes import abrir_generar_mensajes
 import re
 from decimal import Decimal
-from typing import Optional
+from typing import List, Optional, Tuple
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 try:
@@ -113,6 +113,46 @@ def with_retry(fn, tries: int = 3, base: float = 0.5, cap: float = 5.0):
             time.sleep(delay)
     if last_exc is not None:
         raise last_exc
+
+
+def _commit_with_retry(batch, max_tries: int = 4, base_sleep: float = 0.7):
+    """Confirma un batch con reintentos y backoff exponencial."""
+
+    for intento in range(1, max_tries + 1):
+        try:
+            return batch.commit(timeout=60.0)
+        except Exception as exc:  # pragma: no cover - logging side effect
+            if intento >= max_tries:
+                logger.exception(
+                    "No se pudo confirmar el lote tras %s intentos", max_tries
+                )
+                raise
+            delay = min(6.0, base_sleep * (2 ** (intento - 1)))
+            logger.warning(
+                "Error al confirmar lote (intento %s/%s). Reintentando en %.2f s",
+                intento,
+                max_tries,
+                delay,
+                exc_info=exc,
+            )
+            time.sleep(delay)
+
+
+def _paged_query(
+    collection_ref,
+    where_tuple: Tuple[str, str, object],
+    order_field: str = "__name__",
+    page_size: int = 200,
+    start_after=None,
+    timeout: float = 30.0,
+) -> List:
+    """Obtiene una página de documentos ordenados y filtrados."""
+
+    field, op, value = where_tuple
+    query = collection_ref.where(filter=FieldFilter(field, op, value)).order_by(order_field)
+    if start_after is not None:
+        query = query.start_after(start_after)
+    return list(query.limit(page_size).stream(timeout=timeout))
 
 
 def get_doc_safe(doc_ref):
@@ -293,30 +333,59 @@ def enviar_notificaciones_push():
     run_bg(worker, _thread_name="enviar_notificaciones_push")
 
 def crear_mensajes_para_todos():
-    mensaje = simpledialog.askstring("Nuevo mensaje", "Escribe el mensaje que deseas enviar a los usuarios:", parent=ventana)
+    mensaje = simpledialog.askstring(
+        "Nuevo mensaje",
+        "Escribe el mensaje que deseas enviar a los usuarios:",
+        parent=ventana,
+    )
     if not mensaje:
         return
 
+    run_bg(
+        lambda: _crear_mensajes_para_todos_bg(mensaje),
+        _thread_name="crear_mensajes_para_todos",
+    )
+
+
+def _crear_mensajes_para_todos_bg(mensaje: str) -> None:
     root = _get_root()
+    try:
+        usuarios_col = db.collection("UsuariosAutorizados")
+        mensajes_col = db.collection("Mensajes")
 
-    def worker():
-        try:
-            usuarios = with_retry(
-                lambda: db.collection("UsuariosAutorizados").where(
-                    filter=FieldFilter("Mensaje", "==", True)
-                ).get()
+        total_creados = 0
+        pagina_actual = 0
+        ultimo_doc = None
+
+        while True:
+            pagina = _paged_query(
+                usuarios_col,
+                ("Mensaje", "==", True),
+                page_size=200,
+                start_after=ultimo_doc,
             )
-            if not usuarios:
-                info(root, "Sin usuarios", "No hay usuarios con 'Mensaje = true'.")
-                return
 
-            for usuario in usuarios:
+            if not pagina:
+                if pagina_actual == 0 and total_creados == 0:
+                    info(root, "Sin usuarios", "No hay usuarios con 'Mensaje = true'.")
+                    return
+                break
+
+            pagina_actual += 1
+            _set_estado_async(
+                f"📄 Procesando página {pagina_actual} (mensajes creados: {total_creados})"
+            )
+
+            batch = db.batch()
+            batch_count = 0
+
+            for usuario in pagina:
                 uid = usuario.id
                 data = usuario.to_dict() or {}
                 telefono = data.get("Telefono", "")
 
                 ahora = datetime.datetime.now()
-                doc_id = f"{uid}_{ahora.strftime('%Y-%m-%dT%H:%M:%S.%f')}"
+                doc_id = f"{uid}_{ahora.strftime('%Y-%m-%dT%H-%M-%S-%f')}"
                 doc = {
                     "estado": "Pendiente",
                     "fechaHora": ahora,
@@ -324,14 +393,35 @@ def crear_mensajes_para_todos():
                     "telefono": telefono,
                     "uid": uid,
                 }
-                db.collection("Mensajes").document(doc_id).set(doc)
 
-            info(root, "Éxito", f"✅ Se han creado mensajes para {len(usuarios)} usuarios.")
-        except Exception as exc:
-            logger.exception("No se pudieron crear los mensajes automáticos")
-            error(root, "Error", f"No se pudieron crear los mensajes: {exc}")
+                batch.set(mensajes_col.document(doc_id), doc, timeout=30.0)
+                batch_count += 1
 
-    run_bg(worker, _thread_name="crear_mensajes_para_todos")
+                if batch_count >= 100:
+                    _set_estado_async(
+                        f"⬆️ Confirmando lote página {pagina_actual} (total: {total_creados + batch_count})"
+                    )
+                    _commit_with_retry(batch)
+                    total_creados += batch_count
+                    batch = db.batch()
+                    batch_count = 0
+
+            if batch_count:
+                _set_estado_async(
+                    f"⬆️ Confirmando lote final página {pagina_actual} (total: {total_creados + batch_count})"
+                )
+                _commit_with_retry(batch)
+                total_creados += batch_count
+
+            ultimo_doc = pagina[-1]
+
+        _set_estado_async(f"✅ Mensajes creados: {total_creados}")
+        info(root, "Éxito", f"✅ Se han creado mensajes para {total_creados} usuarios.")
+        logger.info("Se crearon %s mensajes pendientes", total_creados)
+    except Exception as exc:  # pragma: no cover - logging side effect
+        logger.exception("No se pudieron crear los mensajes automáticos")
+        _set_estado_async("❌ Error al crear mensajes.")
+        error(root, "Error", f"No se pudieron crear los mensajes: {exc}")
 
 # Funciones de sincronización (descargar, subir, etc.)
 def seleccionar_carpeta_destino():
