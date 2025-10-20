@@ -1,19 +1,22 @@
 import csv
-import datetime
 import logging
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Dict, List, Optional
 
-import requests
-import google.oauth2.service_account
-import google.auth.transport.requests
 from firebase_admin import firestore
 from google.cloud import firestore as _firestore
 
 from thread_utils import run_bg
 from ui_safety import error, info
+
+from main import (
+    _is_valid_fcm_token,
+    enviar_fcm,
+    get_doc_safe,
+    obtener_token_oauth,
+)
 
 try:
     from tkcalendar import DateEntry
@@ -21,11 +24,6 @@ except Exception:
     DateEntry = None
 
 logger = logging.getLogger(__name__)
-
-SCOPES = ["https://www.googleapis.com/auth/firebase.messaging"]
-
-SERVICE_ACCOUNT_JSON: Optional[str] = None
-PROJECT_ID: Optional[str] = None
 
 ventana_peticiones: Optional[tk.Toplevel] = None
 ventana_peticiones_app: Optional["GestionPeticionesUI"] = None
@@ -76,119 +74,33 @@ def _parse_fecha_text(s: str):
     return None
 
 
-def _get_access_token(sa_path: str) -> str:
-    credentials = google.oauth2.service_account.Credentials.from_service_account_file(
-        sa_path, scopes=SCOPES
-    )
-    auth_req = google.auth.transport.requests.Request()
-    credentials.refresh(auth_req)
-    return credentials.token
-
-
-def send_push_to_token(sa_path: str, project_id: str, token: str, title: str, body: str):
-    if not token:
-        raise ValueError("FCM token vacío")
-    access_token = _get_access_token(sa_path)
-    url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
-    payload = {
-        "message": {
-            "token": token,
-            "notification": {"title": title, "body": body},
-            "data": {"tipo": "peticion_dia_libre"},
-        }
-    }
-    r = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {access_token}"},
-        json=payload,
-        timeout=10,
-    )
-    r.raise_for_status()
-
-
-def enviar_push_resultado(
-    db: firestore.Client,
-    uid: str,
-    fecha_str: str,
-    admitido: str,
-    token_prefetch: Optional[str] = None,
-) -> None:
-    token = token_prefetch
-    if not token:
-        doc = db.collection("UsuariosAutorizados").document(uid).get()
-        if not doc.exists:
-            messagebox.showwarning("Push no enviado", "Usuario no encontrado.")
-            return
-        token = (doc.to_dict() or {}).get("fcmToken")
-    if not token:
-        messagebox.showwarning("Push no enviado", "El usuario no tiene fcmToken.")
-        return
-    if not SERVICE_ACCOUNT_JSON or not PROJECT_ID:
-        raise RuntimeError("Credenciales de servicio no configuradas.")
-    title = "Petición de día libre"
-    body = f"Tu petición para {fecha_str} ha sido {admitido}."
-    send_push_to_token(SERVICE_ACCOUNT_JSON, PROJECT_ID, token, title, body)
-
-
-def _get_doc_safe(db, col, doc_id):
-    try:
-        doc = db.collection(col).document(doc_id).get()
-        return doc.to_dict() if doc.exists else None
-    except Exception:
-        logger.exception("Error obteniendo %s/%s", col, doc_id)
-        return None
-
-
-def _crear_mensaje_pendiente(db, uid: str, texto: str) -> None:
-    try:
-        usuario = _get_doc_safe(db, "UsuariosAutorizados", uid) or {}
-        telefono = usuario.get("Telefono", "")
-        ahora = datetime.datetime.now()
-        doc_id = f"{uid}_{ahora.strftime('%Y-%m-%dT%H-%M-%S-%f')}"
-        db.collection("Mensajes").document(doc_id).set(
-            {
-                "estado": "Pendiente",
-                "fechaHora": ahora,
-                "mensaje": texto,
-                "telefono": telefono,
-                "uid": uid,
-            },
-            timeout=30.0,
-        )
-    except Exception:
-        logger.exception("No se pudo crear el mensaje pendiente para %s", uid)
-        raise
-
-
-def _actualizar_peticion(
-    db, peticion_id: str, decision: str, *, respondida_por: str | None = None
-):
+def _actualizar_peticion(db, peticion_id: str, decision: str, *, respondida_por: str | None = None):
     # decision esperada: "OK" o "Denegada"
-    try:
-        db.collection("Peticiones").document(peticion_id).update(
-            {
-                "estado": "Aprobada" if decision == "OK" else "Denegada",
-                "respuesta": decision,
-                "fechaRespuesta": _firestore.SERVER_TIMESTAMP,
-                "respondidaPor": respondida_por,
-            },
-            timeout=30.0,
-        )
-    except Exception:
-        logger.exception("No se pudo actualizar la petición %s", peticion_id)
-        raise
+    estado_map = {"OK": "Aprobada", "Denegada": "Denegada"}
+    db.collection("Peticiones").document(peticion_id).update(
+        {
+            "estado": estado_map.get(decision, decision),
+            "respuesta": decision,
+            "fechaRespuesta": _firestore.SERVER_TIMESTAMP,
+            "respondidaPor": respondida_por
+            or os.getenv("USERNAME")
+            or os.getenv("USER")
+            or "sistema",
+        },
+        timeout=30.0,
+    )
 
 
-def _texto_mensaje_respuesta(nombre: str | None, fecha: str | None, decision: str) -> str:
-    # Personaliza el texto
+def _texto_notif(nombre: str | None, fecha: str | None, decision: str) -> tuple[str, str]:
+    # Devuelve (title, body) para la notificación
+    fecha_txt = f" ({fecha})" if fecha else ""
     if decision == "OK":
-        return f"✅ Tu solicitud de día libre ({fecha}) ha sido APROBADA."
-    return f"❌ Tu solicitud de día libre ({fecha}) ha sido DENEGADA."
+        return ("✅ Día libre aprobado", f"Tu solicitud{fecha_txt} ha sido APROBADA.")
+    else:
+        return ("❌ Día libre denegado", f"Tu solicitud{fecha_txt} ha sido DENEGADA.")
 
 
-def _dialogo_responder_peticion(
-    parent, *, on_ok, on_denegar, titulo="Responder petición", detalle: str = ""
-):
+def _dialogo_responder_peticion(parent, *, detalle: str, on_ok, on_denegar, titulo="Responder petición"):
     win = tk.Toplevel(parent)
     win.title(titulo)
     win.transient(parent)
@@ -198,8 +110,7 @@ def _dialogo_responder_peticion(
     frm = tk.Frame(win, padx=16, pady=16)
     frm.pack(fill="both", expand=True)
 
-    lbl = tk.Label(frm, text=detalle, justify="left")
-    lbl.pack(pady=(0, 12))
+    tk.Label(frm, text=detalle, justify="left").pack(pady=(0, 12))
 
     btns = tk.Frame(frm)
     btns.pack(fill="x")
@@ -211,23 +122,14 @@ def _dialogo_responder_peticion(
             pass
         win.destroy()
 
-    def _ok():
-        try:
-            on_ok()
-        finally:
-            cerrar()
-
-    def _den():
-        try:
-            on_denegar()
-        finally:
-            cerrar()
-
-    tk.Button(btns, text="OK", width=12, command=_ok).pack(side="left", padx=4)
-    tk.Button(btns, text="Denegar", width=12, command=_den).pack(side="left", padx=4)
+    tk.Button(btns, text="OK", width=12, command=lambda: (on_ok(), cerrar())).pack(
+        side="left", padx=4
+    )
+    tk.Button(btns, text="Denegar", width=12, command=lambda: (on_denegar(), cerrar())).pack(
+        side="left", padx=4
+    )
     tk.Button(btns, text="Cancelar", width=12, command=cerrar).pack(side="right", padx=4)
 
-    # centrar sobre parent
     parent.update_idletasks()
     x = parent.winfo_rootx() + parent.winfo_width() // 2 - 160
     y = parent.winfo_rooty() + parent.winfo_height() // 2 - 60
@@ -379,9 +281,11 @@ class GestionPeticionesUI:
         self.tooltip = ToolTip(self.tree)
         self._clear_tooltip()
 
-        self.tree.bind("<Button-1>", self._on_tree_click)
         self.tree.bind("<Motion>", self._on_tree_motion)
         self.tree.bind("<Leave>", lambda _e: self._clear_tooltip())
+
+        self.tree.unbind("<Button-1>")
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
 
         bottom_bar = ttk.Frame(self.window, padding=10)
         bottom_bar.grid(row=3, column=0, sticky="ew")
@@ -567,11 +471,7 @@ class GestionPeticionesUI:
         self._tooltip_state = {"item": item_id, "text": text}
         self.tooltip.show(text, event.x, event.y)
 
-    def _on_tree_click(self, event) -> None:
-        region = self.tree.identify("region", event.x, event.y)
-        if region != "cell":
-            return
-
+    def _on_tree_double_click(self, event) -> None:
         tree = event.widget
         row_id = tree.identify_row(event.y)
         if not row_id:
@@ -579,11 +479,11 @@ class GestionPeticionesUI:
 
         item = tree.item(row_id)
         values = item.get("values", [])
-        if len(values) < 4:
+        if not values:
             return
 
-        peticion_id = values[0]
-        uid = values[1]
+        peticion_id = values[0] if len(values) > 0 else None
+        uid = values[1] if len(values) > 1 else None
         nombre = values[2] if len(values) > 2 else ""
         fecha_str = values[3] if len(values) > 3 else ""
 
@@ -595,54 +495,62 @@ class GestionPeticionesUI:
         def _procesar(decision: str):
             def worker():
                 try:
-                    _actualizar_peticion(
-                        self.db,
-                        peticion_id,
-                        decision,
-                        respondida_por=os.getenv("USERNAME")
-                        or os.getenv("USER")
-                        or "sistema",
-                    )
-                    texto = _texto_mensaje_respuesta(nombre, fecha_str, decision)
-                    _crear_mensaje_pendiente(self.db, uid, texto)
-                    info(
-                        parent,
-                        "Respuesta enviada",
-                        "Se registró la respuesta ("
-                        f"{decision}) y se creó el mensaje para el solicitante.",
-                    )
+                    _actualizar_peticion(self.db, peticion_id, decision)
+
+                    usuario_doc = self.db.collection("UsuariosAutorizados").document(uid)
+                    usuario = get_doc_safe(usuario_doc) or {}
+                    token = usuario.get("fcmToken")
+                    if not _is_valid_fcm_token(token):
+                        info(
+                            parent,
+                            "Aviso",
+                            "El usuario no tiene un token FCM válido. No se envió la notificación.",
+                        )
+                    else:
+                        token_oauth = obtener_token_oauth()
+                        title, body = _texto_notif(nombre, fecha_str, decision)
+                        enviado = enviar_fcm(
+                            uid,
+                            token,
+                            token_oauth,
+                            notification={"title": title, "body": body},
+                            data={"accion": "abrir_usuario_screen"},
+                        )
+                        if enviado:
+                            info(parent, "Notificación", "✅ Notificación enviada al solicitante.")
+                        else:
+                            error(
+                                parent,
+                                "Notificación",
+                                "❌ No se pudo enviar la notificación al solicitante.",
+                            )
+
                     self.actualizar()
                 except Exception as exc:
                     logger.exception("Fallo al responder petición")
-                    error(
-                        parent,
-                        "Error",
-                        f"No se pudo completar la operación: {exc}",
-                    )
+                    error(parent, "Error", f"No se pudo completar la operación: {exc}")
 
             run_bg(worker, _thread_name=f"responder_peticion_{peticion_id}")
 
+        detalle = (
+            f"Solicitante: {nombre}\n"
+            f"Fecha: {fecha_str}\n\n¿Quieres aprobar o denegar esta petición?"
+        )
         _dialogo_responder_peticion(
             parent,
+            detalle=detalle,
             on_ok=lambda: _procesar("OK"),
             on_denegar=lambda: _procesar("Denegada"),
             titulo="Responder petición",
-            detalle=(
-                f"Solicitante: {nombre}\n"
-                f"Fecha: {fecha_str}\n\n¿Quieres aprobar o denegar esta petición?"
-            ),
         )
 
 
 def abrir_gestion_peticiones(db: firestore.Client, sa_path: Optional[str], project_id: Optional[str]) -> None:
-    global ventana_peticiones, ventana_peticiones_app, SERVICE_ACCOUNT_JSON, PROJECT_ID
+    global ventana_peticiones, ventana_peticiones_app
 
     if not sa_path or not project_id:
         messagebox.showerror("Error", "Faltan credenciales de Firebase.")
         return
-
-    SERVICE_ACCOUNT_JSON = sa_path
-    PROJECT_ID = project_id
 
     if ventana_peticiones and ventana_peticiones.winfo_exists():
         ventana_peticiones.lift()
