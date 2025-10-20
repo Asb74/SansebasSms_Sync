@@ -1,6 +1,7 @@
 import csv
 import os
 import tkinter as tk
+from datetime import datetime, timedelta, date
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable, Dict, List, Optional
 
@@ -345,72 +346,100 @@ class ToolTip:
             self.tipwindow = None
 
 
+
 class GestionPeticionesUI:
-    def __init__(self, window: tk.Toplevel, db: firestore.Client, on_close) -> None:
-        self.window = window
+    def __init__(self, window: tk.Toplevel, db: firestore.Client, on_close: Callable[[], None]) -> None:
+        self.root = window
         self.db = db
-        self.on_close = on_close
-        self.data_rows: List[Dict[str, Any]] = []
-        self.tree_items_info: Dict[str, Dict[str, Any]] = {}
+        self._after_close_callback = on_close
+
+        self._editor_abierto: Optional[tk.Toplevel] = None
+        self._poll_job: Optional[str] = None
+        self._peticiones_raw: List[Dict[str, Any]] = []
+
+        self._tree_items_info: Dict[str, Dict[str, Any]] = {}
         self._tooltip_state: Dict[str, Optional[str]] = {"item": None, "text": None}
         self._operacion_en_progreso = False
+        self._closed = False
+
+        self.var_estado = tk.StringVar(value="")
+        self.var_fecha_desde = tk.StringVar()
+        self.var_fecha_hasta = tk.StringVar()
+        self.var_texto = tk.StringVar()
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self._build_ui()
-        self.actualizar()
+
+        try:
+            self.cargar_peticiones(dias=60)
+        except Exception:
+            pass
+        self._pintar_en_tree(self._peticiones_raw)
 
     def _build_ui(self) -> None:
-        top_bar = ttk.Frame(self.window, padding=10)
+        self.root.grid_rowconfigure(2, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+
+        top_bar = ttk.Frame(self.root, padding=10)
         top_bar.grid(row=0, column=0, sticky="ew")
         top_bar.grid_columnconfigure(0, weight=1)
 
-        btn_actualizar = ttk.Button(top_bar, text="Actualizar", command=self.actualizar)
-        btn_actualizar.grid(row=0, column=0, sticky="w")
+        ttk.Button(top_bar, text="Actualizar", command=self.actualizar).grid(
+            row=0, column=0, sticky="w"
+        )
 
-        frame_filtros = ttk.Frame(self.window)
-        frame_filtros.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
-        frame_filtros.grid_columnconfigure(1, weight=1)
+        filtros = ttk.LabelFrame(self.root, text="Filtros", padding=10)
+        filtros.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))
+        for col in range(0, 8):
+            filtros.grid_columnconfigure(col, weight=0)
+        filtros.grid_columnconfigure(5, weight=1)
 
-        ttk.Label(frame_filtros, text="Nombre").grid(row=0, column=0, sticky="w", padx=(0, 4))
-        self.ent_nombre = ttk.Entry(frame_filtros, width=24)
-        self.ent_nombre.grid(row=0, column=1, sticky="w", padx=(0, 10))
-
-        ttk.Label(frame_filtros, text="Fecha").grid(row=0, column=2, sticky="w", padx=(0, 4))
-        if DateEntry:
-            self.ent_fecha = DateEntry(frame_filtros, date_pattern="dd-mm-yyyy", width=12)
-            self.ent_fecha.grid(row=0, column=3, sticky="w", padx=(0, 10))
-            self.ent_fecha.delete(0, tk.END)
-            self.ent_fecha.bind("<Return>", lambda e: self.aplicar_filtros())
-        else:
-            self.ent_fecha = ttk.Entry(frame_filtros, width=12)
-            self.ent_fecha.grid(row=0, column=3, sticky="w", padx=(0, 10))
-            self.ent_fecha.insert(0, "dd-mm-YYYY")
-            self.ent_fecha.bind("<Return>", lambda e: self.aplicar_filtros())
-
-        ttk.Label(frame_filtros, text="Estado").grid(row=0, column=4, sticky="w", padx=(0, 4))
+        ttk.Label(filtros, text="Estado").grid(row=0, column=0, sticky="w")
         self.cmb_estado = ttk.Combobox(
-            frame_filtros,
-            values=("Todos", "Aprobado", "Denegado", "Pendiente"),
+            filtros,
+            textvariable=self.var_estado,
             state="readonly",
+            values=("", "PENDIENTE", "APROBADO", "DENEGADO"),
             width=12,
         )
-        self.cmb_estado.grid(row=0, column=5, sticky="w", padx=(0, 10))
-        self.cmb_estado.current(0)
+        self.cmb_estado.grid(row=0, column=1, padx=(4, 12), pady=2, sticky="w")
+        self.cmb_estado.bind("<<ComboboxSelected>>", lambda _e: self.aplicar_filtros())
 
-        btn_filtrar = ttk.Button(frame_filtros, text="Filtrar", command=self.aplicar_filtros)
-        btn_filtrar.grid(row=0, column=6, sticky="w", padx=(0, 6))
+        ttk.Label(filtros, text="Fecha desde (YYYY-MM-DD)").grid(
+            row=0, column=2, sticky="w"
+        )
+        ttk.Entry(filtros, textvariable=self.var_fecha_desde, width=12).grid(
+            row=0, column=3, padx=(4, 12), pady=2, sticky="w"
+        )
 
-        btn_limpiar = ttk.Button(frame_filtros, text="Limpiar", command=self.limpiar_filtros)
-        btn_limpiar.grid(row=0, column=7, sticky="w")
+        ttk.Label(filtros, text="Fecha hasta (YYYY-MM-DD)").grid(
+            row=0, column=4, sticky="w"
+        )
+        ttk.Entry(filtros, textvariable=self.var_fecha_hasta, width=12).grid(
+            row=0, column=5, padx=(4, 12), pady=2, sticky="w"
+        )
 
-        self.ent_nombre.bind("<Return>", lambda e: self.aplicar_filtros())
-        self.cmb_estado.bind("<<ComboboxSelected>>", lambda e: self.aplicar_filtros())
+        ttk.Label(filtros, text="Texto").grid(row=0, column=6, sticky="w")
+        texto_entry = ttk.Entry(filtros, textvariable=self.var_texto, width=28)
+        texto_entry.grid(row=0, column=7, padx=(4, 12), pady=2, sticky="w")
+        texto_entry.bind("<Return>", lambda _e: self.aplicar_filtros())
 
-        tree_frame = ttk.Frame(self.window, padding=(10, 0, 10, 0))
+        botones = ttk.Frame(filtros)
+        botones.grid(row=1, column=0, columnspan=8, sticky="e", pady=(8, 0))
+        ttk.Button(botones, text="Filtrar", command=self.aplicar_filtros).grid(
+            row=0, column=0, padx=(0, 6)
+        )
+        ttk.Button(botones, text="Limpiar", command=self.limpiar_filtros).grid(
+            row=0, column=1
+        )
+
+        tree_frame = ttk.Frame(self.root, padding=(10, 0, 10, 0))
         tree_frame.grid(row=2, column=0, sticky="nsew")
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
 
-        columnas = ("Nombre", "Fecha", "CreadoEn", "Motivo", "Estado")
+        columnas = ("id", "estado", "solicitante", "fecha", "motivo")
         self.tree = ttk.Treeview(
             tree_frame,
             columns=columnas,
@@ -426,17 +455,17 @@ class GestionPeticionesUI:
         yscroll.grid(row=0, column=1, sticky="ns")
         xscroll.grid(row=1, column=0, sticky="ew")
 
-        self.tree.heading("Nombre", text="Nombre")
-        self.tree.heading("Fecha", text="Fecha")
-        self.tree.heading("CreadoEn", text="CreadoEn")
-        self.tree.heading("Motivo", text="Motivo")
-        self.tree.heading("Estado", text="Estado")
+        self.tree.heading("id", text="ID")
+        self.tree.heading("estado", text="Estado")
+        self.tree.heading("solicitante", text="Solicitante")
+        self.tree.heading("fecha", text="Fecha")
+        self.tree.heading("motivo", text="Motivo")
 
-        self.tree.column("Nombre", width=220, anchor="w")
-        self.tree.column("Fecha", width=140, anchor="center")
-        self.tree.column("CreadoEn", width=200, anchor="center")
-        self.tree.column("Motivo", width=320, anchor="w", stretch=True)
-        self.tree.column("Estado", width=120, anchor="center")
+        self.tree.column("id", width=140, anchor="w")
+        self.tree.column("estado", width=120, anchor="center")
+        self.tree.column("solicitante", width=220, anchor="w")
+        self.tree.column("fecha", width=160, anchor="center")
+        self.tree.column("motivo", width=320, anchor="w")
 
         self.tooltip = ToolTip(self.tree)
         self._clear_tooltip()
@@ -445,15 +474,13 @@ class GestionPeticionesUI:
         self.tree.bind("<Motion>", self._on_tree_motion)
         self.tree.bind("<Leave>", lambda _e: self._clear_tooltip())
 
-        bottom_bar = ttk.Frame(self.window, padding=10)
+        bottom_bar = ttk.Frame(self.root, padding=10)
         bottom_bar.grid(row=3, column=0, sticky="ew")
         bottom_bar.grid_columnconfigure(0, weight=1)
 
-        ttk.Button(
-            bottom_bar,
-            text="Responder",
-            command=self.responder_seleccionada,
-        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Button(bottom_bar, text="Responder", command=self.responder_seleccionada).grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
         ttk.Button(bottom_bar, text="Exportar CSV", command=self.exportar_csv).grid(
             row=0, column=1, sticky="w"
         )
@@ -466,68 +493,196 @@ class GestionPeticionesUI:
             self.tooltip.hide()
         self._tooltip_state = {"item": None, "text": None}
 
-    def _populate_tree(self, rows: List[Dict[str, Any]]) -> None:
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        self.tree_items_info.clear()
+    def _cerrar_editor(self) -> None:
+        if self._editor_abierto is None:
+            return
+        try:
+            if self._editor_abierto.winfo_exists():
+                self._editor_abierto.destroy()
+        except Exception:
+            pass
+        finally:
+            self._editor_abierto = None
 
+    def on_close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
+        if self._poll_job is not None:
+            try:
+                self.root.after_cancel(self._poll_job)
+            except Exception:
+                pass
+            finally:
+                self._poll_job = None
+
+        try:
+            self._cerrar_editor()
+        except Exception:
+            pass
+
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+        if self._after_close_callback:
+            try:
+                self._after_close_callback()
+            except Exception:
+                pass
+
+    def _to_py_dt(self, value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        converter = getattr(value, "to_datetime", None)
+        if callable(converter):
+            try:
+                return converter()
+            except Exception:
+                return None
+        if isinstance(value, str):
+            for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%fZ"):
+                try:
+                    return datetime.strptime(value, fmt)
+                except Exception:
+                    continue
+        return None
+
+    def cargar_peticiones(self, dias: int = 60) -> None:
+        try:
+            documentos = list(self.db.collection("PeticionesDiaLibre").stream())
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                "Error",
+                f"No se pudieron leer las peticiones:\n{exc}",
+            )
+            raise
+
+        limite = None
+        if dias and dias > 0:
+            limite = datetime.utcnow() - timedelta(days=dias)
+
+        peticiones: List[Dict[str, Any]] = []
+        for doc in documentos:
+            data = doc.to_dict() or {}
+            item: Dict[str, Any] = dict(data)
+            item["__id"] = doc.id
+
+            creado = self._to_py_dt(data.get("creadoEn") or data.get("creado_en"))
+            if creado:
+                item["creadoEn"] = creado
+            respondido = self._to_py_dt(data.get("respondidoEn") or data.get("respondido_en"))
+            if respondido:
+                item["respondidoEn"] = respondido
+            fecha_solicitada = self._to_py_dt(
+                data.get("fechaSolicitada")
+                or data.get("fecha_solicitada")
+                or data.get("Fecha")
+                or data.get("fecha")
+            )
+            if fecha_solicitada:
+                item["fechaSolicitada"] = fecha_solicitada
+
+            if limite and creado:
+                creado_comparable = creado
+                if creado_comparable.tzinfo is not None:
+                    try:
+                        creado_comparable = creado_comparable.astimezone().replace(tzinfo=None)
+                    except Exception:
+                        creado_comparable = creado_comparable.replace(tzinfo=None)
+                if creado_comparable < limite:
+                    continue
+
+            if "estado" not in item:
+                estado = data.get("Admitido") or data.get("estadoActual") or "PENDIENTE"
+                item["estado"] = str(estado or "PENDIENTE").upper()
+            else:
+                item["estado"] = str(item.get("estado") or "PENDIENTE").upper()
+
+            if "motivo" not in item:
+                item["motivo"] = data.get("Motivo") or ""
+            item["motivo"] = str(item.get("motivo") or "").strip()
+
+            solicitante_nombre = (
+                data.get("nombreSolicitante")
+                or data.get("NombreSolicitante")
+                or data.get("Nombre")
+            )
+            if solicitante_nombre:
+                item["nombreSolicitante"] = solicitante_nombre
+
+            uid_solicitante = (
+                data.get("uidSolicitante")
+                or data.get("uid")
+                or data.get("uid_solicitante")
+            )
+            if uid_solicitante:
+                item["uidSolicitante"] = uid_solicitante
+
+            peticiones.append(item)
+
+        self._peticiones_raw = peticiones
+        print(f"[GestionPeticionesUI] {len(self._peticiones_raw)} peticiones cargadas")
+
+    def _pintar_en_tree(self, items: List[Dict[str, Any]]) -> None:
+        for item_id in self.tree.get_children():
+            self.tree.delete(item_id)
+        self._tree_items_info.clear()
         self._clear_tooltip()
 
-        for row in rows:
-            nombre = row.get("Nombre") or "Falta"
-            fecha_str = _fmt_fecha(row.get("Fecha"))
-            creado_str = _fmt_fechahora(row.get("CreadoEn"))
-            motivo_val = row.get("Motivo") or ""
-            estado = normalizar_estado(row.get("Admitido"))
-            vals = (nombre, fecha_str, creado_str, motivo_val, estado)
-            iid = row.get("doc_id") or f"row_{len(self.tree_items_info)}"
-            item_id = self.tree.insert("", "end", iid=iid, values=vals)
-            self.tree_items_info[item_id] = row
+        for registro in items:
+            doc_id = (
+                registro.get("__id")
+                or registro.get("doc_id")
+                or f"row_{len(self._tree_items_info)}"
+            )
+            estado = str(
+                registro.get("estado")
+                or registro.get("Admitido")
+                or "PENDIENTE"
+            ).upper()
+            solicitante = (
+                registro.get("nombreSolicitante")
+                or registro.get("Nombre")
+                or registro.get("uidSolicitante")
+                or registro.get("uid")
+                or ""
+            )
+            fecha_val = registro.get("fechaSolicitada") or registro.get("creadoEn")
+            if isinstance(fecha_val, datetime):
+                fecha_text = fecha_val.strftime("%Y-%m-%d %H:%M")
+            else:
+                fecha_text = str(fecha_val or "")
+            motivo = str(
+                registro.get("motivo")
+                or registro.get("Motivo")
+                or ""
+            )
+
+            item_id = self.tree.insert(
+                "",
+                "end",
+                values=(doc_id, estado, solicitante, fecha_text, motivo),
+            )
+            self._tree_items_info[item_id] = registro
 
     def actualizar(self) -> None:
         try:
-            snapshot = self.db.collection("PeticionesDiaLibre").stream()
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudieron leer las peticiones: {e}")
+            self.cargar_peticiones(dias=60)
+        except Exception:
             return
-
-        rows: List[Dict[str, Any]] = []
-        for doc in snapshot:
-            data = doc.to_dict() or {}
-            uid = data.get("uid") or ""
-            nombre = "Falta"
-            token = None
-            try:
-                if uid:
-                    user_doc = self.db.collection("UsuariosAutorizados").document(uid).get()
-                    if user_doc.exists:
-                        user_data = user_doc.to_dict() or {}
-                        nombre = user_data.get("Nombre") or "Falta"
-                        token = user_data.get("fcmToken")
-            except Exception as err:
-                print(f"❌ Error obteniendo usuario {uid}: {err}")
-
-            row = {
-                "doc_id": doc.id,
-                "uid": uid,
-                "fcmToken": token,
-                "Nombre": nombre or "Falta",
-                "Fecha": data.get("Fecha") or data.get("fechaSolicitada"),
-                "CreadoEn": data.get("creadoEn") or data.get("creado_en"),
-                "Admitido": data.get("estado") or data.get("Admitido") or data.get("estadoActual") or "",
-                "Motivo": (data.get("Motivo") or data.get("motivo") or "").strip(),
-            }
-            rows.append(row)
-
-        self.data_rows = rows
         self.aplicar_filtros()
 
     def _obtener_item_seleccionado(self) -> Optional[str]:
-        selection = self.tree.focus()
-        if selection:
-            return selection
-        seleccionados = self.tree.selection()
-        return seleccionados[0] if seleccionados else None
+        seleccionado = self.tree.focus()
+        if seleccionado:
+            return seleccionado
+        seleccion = self.tree.selection()
+        return seleccion[0] if seleccion else None
 
     def responder_seleccionada(self) -> None:
         item_id = self._obtener_item_seleccionado()
@@ -540,15 +695,19 @@ class GestionPeticionesUI:
         if self._operacion_en_progreso:
             return
 
-        row_info = self.tree_items_info.get(item_id)
-        if not row_info:
+        registro = self._tree_items_info.get(item_id)
+        if not registro:
             messagebox.showerror(
                 "Error",
                 "No se encontró la información de la petición seleccionada.",
             )
             return
 
-        estado_actual = (row_info.get("Admitido") or "").strip().upper() or "PENDIENTE"
+        estado_actual = str(
+            registro.get("estado")
+            or registro.get("Admitido")
+            or "PENDIENTE"
+        ).upper()
         if estado_actual != "PENDIENTE":
             messagebox.showwarning(
                 "Solicitud respondida",
@@ -559,65 +718,92 @@ class GestionPeticionesUI:
         self._operacion_en_progreso = True
         try:
             responder_peticion(
-                self.window,
-                row_info.get("doc_id") or "",
-                row_info.get("uid") or "",
-                lambda: self.window.after(0, self.actualizar),
+                self.root,
+                registro.get("__id") or registro.get("doc_id") or "",
+                registro.get("uidSolicitante") or registro.get("uid") or "",
+                lambda: self.root.after(0, self.actualizar),
                 db_client=self.db,
                 responded_by=RESPONDER_IDENTIDAD,
             )
         finally:
             self._operacion_en_progreso = False
 
-    def _on_tree_double_click(self, event) -> None:
-        item_id = self.tree.identify_row(event.y)
-        if not item_id:
+    def _parse_fecha(self, valor: str, campo: str) -> Optional[date]:
+        valor = (valor or "").strip()
+        if not valor:
+            return None
+        try:
+            return datetime.strptime(valor, "%Y-%m-%d").date()
+        except ValueError as exc:  # noqa: B904
+            raise ValueError(f"{campo} debe tener formato YYYY-MM-DD.") from exc
+
+    def aplicar_filtros(self) -> None:
+        estado = self.var_estado.get().strip().upper()
+        texto = self.var_texto.get().strip().lower()
+
+        try:
+            fecha_desde = self._parse_fecha(self.var_fecha_desde.get(), "Fecha desde")
+            fecha_hasta = self._parse_fecha(self.var_fecha_hasta.get(), "Fecha hasta")
+        except ValueError as exc:
+            messagebox.showerror("Filtros", str(exc))
             return
-        self._responder_item(item_id)
 
-    def aplicar_filtros(self, *_args) -> None:
-        nombre_filter = (self.ent_nombre.get() or "").strip().lower()
-        fecha_text = (self.ent_fecha.get() or "").strip()
-        if not DateEntry and fecha_text.lower() == "dd-mm-yyyy":
-            fecha_text = ""
-        fecha_dt = _parse_fecha_text(fecha_text)
-        estado_filter = self.cmb_estado.get()
+        if fecha_desde and fecha_hasta and fecha_desde > fecha_hasta:
+            messagebox.showerror(
+                "Filtros",
+                "La fecha desde no puede ser mayor que la fecha hasta.",
+            )
+            return
 
-        def pasa_estado(fila: Dict[str, Any]) -> bool:
-            estado = normalizar_estado(fila.get("Admitido"))
-            return (estado_filter == "Todos") or (estado == estado_filter)
-
-        filtrados: List[Dict[str, Any]] = []
-        for row in self.data_rows:
-            nombre = (row.get("Nombre") or "").lower()
-            if nombre_filter and nombre_filter not in nombre:
+        resultados: List[Dict[str, Any]] = []
+        for registro in self._peticiones_raw:
+            estado_actual = str(
+                registro.get("estado")
+                or registro.get("Admitido")
+                or "PENDIENTE"
+            ).upper()
+            if estado and estado_actual != estado:
                 continue
 
-            if fecha_dt:
-                row_fecha = _to_local(row.get("Fecha"))
-                if not row_fecha or row_fecha.date() != fecha_dt.date():
+            fecha_base = registro.get("fechaSolicitada") or registro.get("creadoEn")
+            fecha_base_dt = None
+            if isinstance(fecha_base, datetime):
+                fecha_base_dt = fecha_base.date()
+            elif isinstance(fecha_base, str):
+                parsed = self._to_py_dt(fecha_base)
+                if parsed:
+                    fecha_base_dt = parsed.date()
+
+            if fecha_desde and (fecha_base_dt is None or fecha_base_dt < fecha_desde):
+                continue
+            if fecha_hasta and (fecha_base_dt is None or fecha_base_dt > fecha_hasta):
+                continue
+
+            if texto:
+                campos = [
+                    str(registro.get("uidSolicitante") or registro.get("uid") or ""),
+                    str(registro.get("nombreSolicitante") or registro.get("Nombre") or ""),
+                    str(registro.get("motivo") or registro.get("Motivo") or ""),
+                    str(registro.get("comentario") or registro.get("comentarios") or ""),
+                ]
+                combinado = " ".join(c.lower() for c in campos)
+                if texto not in combinado:
                     continue
 
-            if not pasa_estado(row):
-                continue
+            resultados.append(registro)
 
-            filtrados.append(row)
-
-        self._populate_tree(filtrados)
+        self._pintar_en_tree(resultados)
 
     def limpiar_filtros(self) -> None:
-        self.ent_nombre.delete(0, tk.END)
-        if DateEntry and isinstance(self.ent_fecha, DateEntry):
-            try:
-                self.ent_fecha.set_date("")
-            except Exception:
-                self.ent_fecha.delete(0, tk.END)
-            else:
-                self.ent_fecha.delete(0, tk.END)
-        else:
-            self.ent_fecha.delete(0, tk.END)
-        self.cmb_estado.current(0)
-        self.aplicar_filtros()
+        self.var_estado.set("")
+        try:
+            self.cmb_estado.current(0)
+        except Exception:
+            pass
+        self.var_fecha_desde.set("")
+        self.var_fecha_hasta.set("")
+        self.var_texto.set("")
+        self._pintar_en_tree(self._peticiones_raw)
 
     def exportar_csv(self) -> None:
         items = self.tree.get_children("")
@@ -631,14 +817,20 @@ class GestionPeticionesUI:
         )
         if not path:
             return
-        cols = ["Nombre", "Fecha", "CreadoEn", "Motivo", "Estado"]
-        with open(path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.writer(f, delimiter=";")
-            writer.writerow(cols)
-            for item in items:
-                values = list(self.tree.item(item, "values"))
-                writer.writerow(values)
+
+        columnas = ["ID", "Estado", "Solicitante", "Fecha", "Motivo"]
+        with open(path, "w", newline="", encoding="utf-8-sig") as archivo:
+            writer = csv.writer(archivo, delimiter=";")
+            writer.writerow(columnas)
+            for item_id in items:
+                writer.writerow(self.tree.item(item_id, "values"))
         messagebox.showinfo("Exportar CSV", "Exportación completada.")
+
+    def _on_tree_double_click(self, event) -> None:
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            return
+        self._responder_item(item_id)
 
     def _on_tree_motion(self, event) -> None:
         region = self.tree.identify("region", event.x, event.y)
@@ -647,7 +839,7 @@ class GestionPeticionesUI:
             return
 
         column = self.tree.identify_column(event.x)
-        if column != "#4":
+        if column != "#5":
             self._clear_tooltip()
             return
 
@@ -656,20 +848,19 @@ class GestionPeticionesUI:
             self._clear_tooltip()
             return
 
-        text = (self.tree.set(item_id, "Motivo") or "").strip()
-        if not text or len(text) <= 48:
+        texto = (self.tree.set(item_id, "motivo") or "").strip()
+        if not texto or len(texto) <= 48:
             self._clear_tooltip()
             return
 
         if (
             self._tooltip_state.get("item") == item_id
-            and self._tooltip_state.get("text") == text
+            and self._tooltip_state.get("text") == texto
         ):
             return
 
-        self._tooltip_state = {"item": item_id, "text": text}
-        self.tooltip.show(text, event.x, event.y)
-
+        self._tooltip_state = {"item": item_id, "text": texto}
+        self.tooltip.show(texto, event.x, event.y)
 
 def abrir_gestion_peticiones(db: firestore.Client, sa_path: Optional[str], project_id: Optional[str]) -> None:
     global ventana_peticiones, ventana_peticiones_app, SERVICE_ACCOUNT_JSON, PROJECT_ID
@@ -694,18 +885,11 @@ def abrir_gestion_peticiones(db: firestore.Client, sa_path: Optional[str], proje
     ventana_peticiones.grid_rowconfigure(2, weight=1)
     ventana_peticiones.grid_columnconfigure(0, weight=1)
 
-    def on_close():
+    def _after_close() -> None:
         global ventana_peticiones, ventana_peticiones_app
-        if ventana_peticiones_app:
-            ventana_peticiones_app._cerrar_editor()
-        win = ventana_peticiones
         ventana_peticiones = None
         ventana_peticiones_app = None
-        if win is not None:
-            win.destroy()
 
-    app = GestionPeticionesUI(ventana_peticiones, db, on_close)
+    app = GestionPeticionesUI(ventana_peticiones, db, _after_close)
     ventana_peticiones_app = app
-
-    ventana_peticiones.protocol("WM_DELETE_WINDOW", on_close)
     ventana_peticiones.focus_force()
