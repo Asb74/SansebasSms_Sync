@@ -1,4 +1,7 @@
 import csv
+import datetime
+import logging
+import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Dict, List, Optional
@@ -7,11 +10,17 @@ import requests
 import google.oauth2.service_account
 import google.auth.transport.requests
 from firebase_admin import firestore
+from google.cloud import firestore as _firestore
+
+from thread_utils import run_bg
+from ui_safety import error, info
 
 try:
     from tkcalendar import DateEntry
 except Exception:
     DateEntry = None
+
+logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/firebase.messaging"]
 
@@ -46,8 +55,10 @@ def normalizar_estado(v: str | None) -> str:
     s = (v or "").strip().lower()
     if s == "ok":
         return "Ok"
-    if s == "denegado":
-        return "Denegado"
+    if s in {"denegado", "denegada"}:
+        return "Denegada"
+    if s in {"aprobado", "aprobada"}:
+        return "Ok"
     return "Pendiente"
 
 
@@ -119,6 +130,112 @@ def enviar_push_resultado(
     send_push_to_token(SERVICE_ACCOUNT_JSON, PROJECT_ID, token, title, body)
 
 
+def _get_doc_safe(db, col, doc_id):
+    try:
+        doc = db.collection(col).document(doc_id).get()
+        return doc.to_dict() if doc.exists else None
+    except Exception:
+        logger.exception("Error obteniendo %s/%s", col, doc_id)
+        return None
+
+
+def _crear_mensaje_pendiente(db, uid: str, texto: str) -> None:
+    try:
+        usuario = _get_doc_safe(db, "UsuariosAutorizados", uid) or {}
+        telefono = usuario.get("Telefono", "")
+        ahora = datetime.datetime.now()
+        doc_id = f"{uid}_{ahora.strftime('%Y-%m-%dT%H-%M-%S-%f')}"
+        db.collection("Mensajes").document(doc_id).set(
+            {
+                "estado": "Pendiente",
+                "fechaHora": ahora,
+                "mensaje": texto,
+                "telefono": telefono,
+                "uid": uid,
+            },
+            timeout=30.0,
+        )
+    except Exception:
+        logger.exception("No se pudo crear el mensaje pendiente para %s", uid)
+        raise
+
+
+def _actualizar_peticion(
+    db, peticion_id: str, decision: str, *, respondida_por: str | None = None
+):
+    # decision esperada: "OK" o "Denegada"
+    try:
+        db.collection("Peticiones").document(peticion_id).update(
+            {
+                "estado": "Aprobada" if decision == "OK" else "Denegada",
+                "respuesta": decision,
+                "fechaRespuesta": _firestore.SERVER_TIMESTAMP,
+                "respondidaPor": respondida_por,
+            },
+            timeout=30.0,
+        )
+    except Exception:
+        logger.exception("No se pudo actualizar la petición %s", peticion_id)
+        raise
+
+
+def _texto_mensaje_respuesta(nombre: str | None, fecha: str | None, decision: str) -> str:
+    # Personaliza el texto
+    if decision == "OK":
+        return f"✅ Tu solicitud de día libre ({fecha}) ha sido APROBADA."
+    return f"❌ Tu solicitud de día libre ({fecha}) ha sido DENEGADA."
+
+
+def _dialogo_responder_peticion(
+    parent, *, on_ok, on_denegar, titulo="Responder petición", detalle: str = ""
+):
+    win = tk.Toplevel(parent)
+    win.title(titulo)
+    win.transient(parent)
+    win.grab_set()
+    win.resizable(False, False)
+
+    frm = tk.Frame(win, padx=16, pady=16)
+    frm.pack(fill="both", expand=True)
+
+    lbl = tk.Label(frm, text=detalle, justify="left")
+    lbl.pack(pady=(0, 12))
+
+    btns = tk.Frame(frm)
+    btns.pack(fill="x")
+
+    def cerrar():
+        try:
+            win.grab_release()
+        except Exception:
+            pass
+        win.destroy()
+
+    def _ok():
+        try:
+            on_ok()
+        finally:
+            cerrar()
+
+    def _den():
+        try:
+            on_denegar()
+        finally:
+            cerrar()
+
+    tk.Button(btns, text="OK", width=12, command=_ok).pack(side="left", padx=4)
+    tk.Button(btns, text="Denegar", width=12, command=_den).pack(side="left", padx=4)
+    tk.Button(btns, text="Cancelar", width=12, command=cerrar).pack(side="right", padx=4)
+
+    # centrar sobre parent
+    parent.update_idletasks()
+    x = parent.winfo_rootx() + parent.winfo_width() // 2 - 160
+    y = parent.winfo_rooty() + parent.winfo_height() // 2 - 60
+    win.geometry(f"+{x}+{y}")
+
+    win.wait_window(win)
+
+
 class ToolTip:
     def __init__(self, widget: tk.Widget) -> None:
         self.widget = widget
@@ -162,7 +279,6 @@ class GestionPeticionesUI:
         self.on_close = on_close
         self.data_rows: List[Dict[str, Any]] = []
         self.tree_items_info: Dict[str, Dict[str, Any]] = {}
-        self.editor_state: Dict[str, Any] = {"widget": None, "item": None, "old": None}
         self._tooltip_state: Dict[str, Optional[str]] = {"item": None, "text": None}
 
         self._build_ui()
@@ -199,7 +315,7 @@ class GestionPeticionesUI:
         ttk.Label(frame_filtros, text="Estado").grid(row=0, column=4, sticky="w", padx=(0, 4))
         self.cmb_estado = ttk.Combobox(
             frame_filtros,
-            values=("Todos", "Ok", "Denegado", "Pendiente"),
+            values=("Todos", "Ok", "Denegada", "Pendiente"),
             state="readonly",
             width=12,
         )
@@ -220,7 +336,15 @@ class GestionPeticionesUI:
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
 
-        columnas = ("Nombre", "Fecha", "CreadoEn", "Motivo", "Admitido")
+        columnas = (
+            "_PeticionId",
+            "_Uid",
+            "Nombre",
+            "Fecha",
+            "CreadoEn",
+            "Motivo",
+            "Admitido",
+        )
         self.tree = ttk.Treeview(
             tree_frame,
             columns=columnas,
@@ -236,12 +360,16 @@ class GestionPeticionesUI:
         yscroll.grid(row=0, column=1, sticky="ns")
         xscroll.grid(row=1, column=0, sticky="ew")
 
+        self.tree.heading("_PeticionId", text="")
+        self.tree.heading("_Uid", text="")
         self.tree.heading("Nombre", text="Nombre")
         self.tree.heading("Fecha", text="Fecha")
         self.tree.heading("CreadoEn", text="CreadoEn")
         self.tree.heading("Motivo", text="Motivo")
         self.tree.heading("Admitido", text="Admitido")
 
+        self.tree.column("_PeticionId", width=0, stretch=False, minwidth=0)
+        self.tree.column("_Uid", width=0, stretch=False, minwidth=0)
         self.tree.column("Nombre", width=220, anchor="w")
         self.tree.column("Fecha", width=140, anchor="center")
         self.tree.column("CreadoEn", width=200, anchor="center")
@@ -251,7 +379,7 @@ class GestionPeticionesUI:
         self.tooltip = ToolTip(self.tree)
         self._clear_tooltip()
 
-        self.tree.bind("<Double-1>", self._iniciar_edicion)
+        self.tree.bind("<Button-1>", self._on_tree_click)
         self.tree.bind("<Motion>", self._on_tree_motion)
         self.tree.bind("<Leave>", lambda _e: self._clear_tooltip())
 
@@ -267,11 +395,6 @@ class GestionPeticionesUI:
         )
 
     def _cerrar_editor(self) -> None:
-        widget = self.editor_state.get("widget")
-        if widget is not None:
-            widget.destroy()
-        self.editor_state = {"widget": None, "item": None, "old": None}
-
         self._clear_tooltip()
 
     def _clear_tooltip(self) -> None:
@@ -293,7 +416,15 @@ class GestionPeticionesUI:
             creado_str = _fmt_fechahora(row.get("CreadoEn"))
             motivo_val = row.get("Motivo") or ""
             estado = normalizar_estado(row.get("Admitido"))
-            vals = (nombre, fecha_str, creado_str, motivo_val, estado)
+            vals = (
+                row.get("doc_id"),
+                row.get("uid"),
+                nombre,
+                fecha_str,
+                creado_str,
+                motivo_val,
+                estado,
+            )
             iid = row.get("doc_id") or f"row_{len(self.tree_items_info)}"
             item_id = self.tree.insert("", "end", iid=iid, values=vals)
             self.tree_items_info[item_id] = row
@@ -329,7 +460,10 @@ class GestionPeticionesUI:
                 "Nombre": nombre or "Falta",
                 "Fecha": data.get("Fecha"),
                 "CreadoEn": data.get("creadoEn"),
-                "Admitido": data.get("Admitido") or "",
+                "Admitido": data.get("respuesta")
+                or data.get("Admitido")
+                or data.get("estado")
+                or "",
                 "Motivo": (data.get("Motivo") or "").strip(),
             }
             rows.append(row)
@@ -399,6 +533,7 @@ class GestionPeticionesUI:
             writer.writerow(cols)
             for item in items:
                 values = list(self.tree.item(item, "values"))
+                values = values[2:]
                 writer.writerow(values)
         messagebox.showinfo("Exportar CSV", "Exportación completada.")
 
@@ -409,7 +544,7 @@ class GestionPeticionesUI:
             return
 
         column = self.tree.identify_column(event.x)
-        if column != "#4":
+        if column != "#6":
             self._clear_tooltip()
             return
 
@@ -432,88 +567,71 @@ class GestionPeticionesUI:
         self._tooltip_state = {"item": item_id, "text": text}
         self.tooltip.show(text, event.x, event.y)
 
-    def _guardar_cambio(self, nuevo_valor: str) -> None:
-        widget = self.editor_state.get("widget")
-        item_id = self.editor_state.get("item")
-        old_value = self.editor_state.get("old") or ""
-        if not widget or not item_id:
-            return
-
-        widget.destroy()
-        self.editor_state = {"widget": None, "item": None, "old": None}
-
-        nuevo_valor = (nuevo_valor or "").strip()
-        if not nuevo_valor or nuevo_valor == old_value:
-            self.tree.set(item_id, "Admitido", old_value)
-            return
-
-        row_info = self.tree_items_info.get(item_id)
-        if not row_info:
-            messagebox.showerror("Error", "No se encontró la información de la petición.")
-            self.tree.set(item_id, "Admitido", old_value)
-            return
-
-        try:
-            self.db.collection("Peticiones").document(row_info["doc_id"]).update({"Admitido": nuevo_valor})
-            fecha_str = _fmt_fecha(row_info.get("Fecha"))
-            enviar_push_resultado(
-                self.db,
-                row_info.get("uid") or "",
-                fecha_str,
-                nuevo_valor,
-                row_info.get("fcmToken"),
-            )
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo actualizar la petición: {e}")
-            self.tree.set(item_id, "Admitido", old_value)
-            return
-
-        row_info["Admitido"] = nuevo_valor
-        self.tree.set(item_id, "Admitido", normalizar_estado(nuevo_valor))
-        self.aplicar_filtros()
-
-    def _iniciar_edicion(self, event) -> None:
+    def _on_tree_click(self, event) -> None:
         region = self.tree.identify("region", event.x, event.y)
         if region != "cell":
             return
-        column = self.tree.identify_column(event.x)
-        if column != "#5":
-            return
-        item_id = self.tree.identify_row(event.y)
-        if not item_id:
-            return
 
-        bbox = self.tree.bbox(item_id, column)
-        if not bbox:
+        tree = event.widget
+        row_id = tree.identify_row(event.y)
+        if not row_id:
             return
 
-        self._cerrar_editor()
+        item = tree.item(row_id)
+        values = item.get("values", [])
+        if len(values) < 4:
+            return
 
-        self._clear_tooltip()
+        peticion_id = values[0]
+        uid = values[1]
+        nombre = values[2] if len(values) > 2 else ""
+        fecha_str = values[3] if len(values) > 3 else ""
 
-        x, y, width, height = bbox
-        current_value = self.tree.set(item_id, "Admitido")
-        combo = ttk.Combobox(
-            self.tree,
-            values=["Ok", "Denegado"],
-            state="readonly",
+        if not peticion_id or not uid:
+            return
+
+        parent = tree.winfo_toplevel()
+
+        def _procesar(decision: str):
+            def worker():
+                try:
+                    _actualizar_peticion(
+                        self.db,
+                        peticion_id,
+                        decision,
+                        respondida_por=os.getenv("USERNAME")
+                        or os.getenv("USER")
+                        or "sistema",
+                    )
+                    texto = _texto_mensaje_respuesta(nombre, fecha_str, decision)
+                    _crear_mensaje_pendiente(self.db, uid, texto)
+                    info(
+                        parent,
+                        "Respuesta enviada",
+                        "Se registró la respuesta ("
+                        f"{decision}) y se creó el mensaje para el solicitante.",
+                    )
+                    self.actualizar()
+                except Exception as exc:
+                    logger.exception("Fallo al responder petición")
+                    error(
+                        parent,
+                        "Error",
+                        f"No se pudo completar la operación: {exc}",
+                    )
+
+            run_bg(worker, _thread_name=f"responder_peticion_{peticion_id}")
+
+        _dialogo_responder_peticion(
+            parent,
+            on_ok=lambda: _procesar("OK"),
+            on_denegar=lambda: _procesar("Denegada"),
+            titulo="Responder petición",
+            detalle=(
+                f"Solicitante: {nombre}\n"
+                f"Fecha: {fecha_str}\n\n¿Quieres aprobar o denegar esta petición?"
+            ),
         )
-        combo.place(x=x, y=y, width=width, height=height)
-        combo.set(current_value if current_value in ["Ok", "Denegado"] else "Ok")
-        combo.focus_set()
-
-        self.editor_state = {"widget": combo, "item": item_id, "old": current_value}
-
-        def _commit(event=None):
-            self._guardar_cambio(combo.get())
-
-        def _cancel(event=None):
-            self._cerrar_editor()
-
-        combo.bind("<<ComboboxSelected>>", _commit)
-        combo.bind("<FocusOut>", _commit)
-        combo.bind("<Return>", _commit)
-        combo.bind("<Escape>", _cancel)
 
 
 def abrir_gestion_peticiones(db: firestore.Client, sa_path: Optional[str], project_id: Optional[str]) -> None:
