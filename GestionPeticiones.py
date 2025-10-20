@@ -548,6 +548,17 @@ class GestionPeticionesUI:
 def abrir_gestion_peticiones(db: firestore.Client, sa_path: Optional[str], project_id: Optional[str]) -> None:
     global ventana_peticiones, ventana_peticiones_app
 
+    if db is None:
+        main_globals = obtener_token_oauth.__globals__
+        firebase_admin = main_globals["firebase_admin"]
+        credentials = main_globals["credentials"]
+        credenciales_dinamicas = main_globals["credenciales_dinamicas"]
+
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(credenciales_dinamicas["ruta"])
+            firebase_admin.initialize_app(cred)
+        db = firestore.client()
+
     if not sa_path or not project_id:
         messagebox.showerror("Error", "Faltan credenciales de Firebase.")
         return
