@@ -1,7 +1,8 @@
 import csv
+import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import requests
 import google.oauth2.service_account
@@ -20,6 +21,195 @@ PROJECT_ID: Optional[str] = None
 
 ventana_peticiones: Optional[tk.Toplevel] = None
 ventana_peticiones_app: Optional["GestionPeticionesUI"] = None
+
+RESPONDER_IDENTIDAD = os.getenv("SANSEBASSMS_RESPONDER", "desktop_app")
+
+
+class PeticionNoEncontradaError(RuntimeError):
+    """Error raised when the request document does not exist."""
+
+
+class PeticionYaRespondidaError(RuntimeError):
+    """Error raised when trying to respond a request already handled."""
+
+
+def mostrar_dialogo_respuesta(
+    root: tk.Misc, titulo: str = "Responder petición"
+) -> Optional[str]:
+    dlg = tk.Toplevel(root)
+    dlg.title(titulo)
+    dlg.transient(root)
+    dlg.grab_set()
+    dlg.resizable(False, False)
+
+    tk.Label(
+        dlg,
+        text="Selecciona una respuesta para la petición de día libre:",
+        wraplength=360,
+        justify="left",
+    ).pack(padx=16, pady=12)
+
+    choice: Dict[str, Optional[str]] = {"val": None}
+
+    def _set_choice(val: Optional[str]) -> None:
+        choice["val"] = val
+        dlg.destroy()
+
+    buttons_frame = tk.Frame(dlg)
+    buttons_frame.pack(padx=16, pady=(4, 16), fill="x")
+
+    tk.Button(
+        buttons_frame,
+        text="✅ OK",
+        width=12,
+        command=lambda: _set_choice("APROBADO"),
+    ).pack(side="left", expand=True, padx=4)
+    tk.Button(
+        buttons_frame,
+        text="⛔ Denegar",
+        width=12,
+        command=lambda: _set_choice("DENEGADO"),
+    ).pack(side="left", expand=True, padx=4)
+    tk.Button(
+        buttons_frame,
+        text="Cancelar",
+        width=12,
+        command=lambda: _set_choice(None),
+    ).pack(side="right", expand=True, padx=4)
+
+    dlg.update_idletasks()
+    try:
+        x = root.winfo_rootx() + (root.winfo_width() - dlg.winfo_width()) // 2
+        y = root.winfo_rooty() + (root.winfo_height() - dlg.winfo_height()) // 2
+        dlg.geometry(f"+{x}+{y}")
+    except Exception:
+        pass
+
+    root.wait_window(dlg)
+    return choice["val"]
+
+
+def _cola_notificacion(
+    db_client: firestore.Client, uid_solicitante: str, estado: str, solicitud_id: str
+) -> None:
+    cuerpo = (
+        "✅ Tu día libre ha sido aprobado."
+        if estado == "APROBADO"
+        else "⛔ Tu día libre ha sido denegado."
+    )
+    db_client.collection("NotificacionesPendientes").add(
+        {
+            "uid": uid_solicitante,
+            "titulo": "Respuesta a tu petición",
+            "body": cuerpo,
+            "tipo": "dia_libre",
+            "solicitudId": solicitud_id,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+        }
+    )
+
+
+def responder_peticion(
+    root: tk.Misc,
+    solicitud_id: str,
+    uid_solicitante: str,
+    on_refrescar_ui: Callable[[], None],
+    *,
+    db_client: firestore.Client,
+    responded_by: str,
+) -> None:
+    eleccion = mostrar_dialogo_respuesta(root)
+    if eleccion is None:
+        return
+
+    if not solicitud_id:
+        messagebox.showerror("Error", "No se encontró el identificador de la solicitud.")
+        return
+
+    if not uid_solicitante:
+        messagebox.showerror("Error", "No se encontró el solicitante asociado.")
+        return
+
+    root.configure(cursor="watch")
+    root.update_idletasks()
+
+    doc_ref = db_client.collection("PeticionesDiaLibre").document(solicitud_id)
+
+    transaction = db_client.transaction()
+
+    @firestore.transactional
+    def _ejecutar(trans) -> None:  # type: ignore[override]
+        snap = doc_ref.get(transaction=trans)
+        if not snap.exists:
+            raise PeticionNoEncontradaError()
+
+        data = snap.to_dict() or {}
+        estado_actual = (data.get("estado") or data.get("Admitido") or "").upper() or "PENDIENTE"
+        if estado_actual != "PENDIENTE":
+            raise PeticionYaRespondidaError()
+
+        trans.update(
+            doc_ref,
+            {
+                "estado": eleccion,
+                "respondidoPor": responded_by,
+                "respondidoEn": firestore.SERVER_TIMESTAMP,
+            },
+        )
+
+        historial_ref = doc_ref.collection("historial").document()
+        trans.set(
+            historial_ref,
+            {
+                "evento": "RESPUESTA",
+                "nuevoEstado": eleccion,
+                "timestamp": firestore.SERVER_TIMESTAMP,
+                "respondidoPor": responded_by,
+            },
+        )
+
+    try:
+        _ejecutar(transaction)
+    except PeticionNoEncontradaError:
+        messagebox.showerror("Error", "La solicitud seleccionada no existe.")
+        try:
+            on_refrescar_ui()
+        except Exception:
+            pass
+        return
+    except PeticionYaRespondidaError:
+        messagebox.showwarning(
+            "Aviso",
+            "La solicitud ya fue respondida previamente.",
+        )
+        try:
+            on_refrescar_ui()
+        except Exception:
+            pass
+        return
+    except Exception as exc:  # noqa: BLE001
+        messagebox.showerror(
+            "Error",
+            f"No se pudo registrar la respuesta:\n{exc}",
+        )
+        return
+    finally:
+        root.configure(cursor="")
+
+    try:
+        _cola_notificacion(db_client, uid_solicitante, eleccion, solicitud_id)
+    except Exception as exc:  # noqa: BLE001
+        messagebox.showwarning(
+            "Aviso",
+            f"La respuesta se guardó pero no se pudo encolar la notificación:\n{exc}",
+        )
+    else:
+        messagebox.showinfo("Respuesta registrada", "Se notificó al solicitante.")
+
+    try:
+        on_refrescar_ui()
+    except Exception:
+        pass
 
 
 def _to_local(dt):
@@ -44,9 +234,9 @@ def _fmt_fechahora(dt):
 
 def normalizar_estado(v: str | None) -> str:
     s = (v or "").strip().lower()
-    if s == "ok":
-        return "Ok"
-    if s == "denegado":
+    if s in {"ok", "aprobado"}:
+        return "Aprobado"
+    if s in {"denegado"}:
         return "Denegado"
     return "Pendiente"
 
@@ -162,8 +352,8 @@ class GestionPeticionesUI:
         self.on_close = on_close
         self.data_rows: List[Dict[str, Any]] = []
         self.tree_items_info: Dict[str, Dict[str, Any]] = {}
-        self.editor_state: Dict[str, Any] = {"widget": None, "item": None, "old": None}
         self._tooltip_state: Dict[str, Optional[str]] = {"item": None, "text": None}
+        self._operacion_en_progreso = False
 
         self._build_ui()
         self.actualizar()
@@ -199,7 +389,7 @@ class GestionPeticionesUI:
         ttk.Label(frame_filtros, text="Estado").grid(row=0, column=4, sticky="w", padx=(0, 4))
         self.cmb_estado = ttk.Combobox(
             frame_filtros,
-            values=("Todos", "Ok", "Denegado", "Pendiente"),
+            values=("Todos", "Aprobado", "Denegado", "Pendiente"),
             state="readonly",
             width=12,
         )
@@ -220,7 +410,7 @@ class GestionPeticionesUI:
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
 
-        columnas = ("Nombre", "Fecha", "CreadoEn", "Motivo", "Admitido")
+        columnas = ("Nombre", "Fecha", "CreadoEn", "Motivo", "Estado")
         self.tree = ttk.Treeview(
             tree_frame,
             columns=columnas,
@@ -240,18 +430,18 @@ class GestionPeticionesUI:
         self.tree.heading("Fecha", text="Fecha")
         self.tree.heading("CreadoEn", text="CreadoEn")
         self.tree.heading("Motivo", text="Motivo")
-        self.tree.heading("Admitido", text="Admitido")
+        self.tree.heading("Estado", text="Estado")
 
         self.tree.column("Nombre", width=220, anchor="w")
         self.tree.column("Fecha", width=140, anchor="center")
         self.tree.column("CreadoEn", width=200, anchor="center")
         self.tree.column("Motivo", width=320, anchor="w", stretch=True)
-        self.tree.column("Admitido", width=120, anchor="center")
+        self.tree.column("Estado", width=120, anchor="center")
 
         self.tooltip = ToolTip(self.tree)
         self._clear_tooltip()
 
-        self.tree.bind("<Double-1>", self._iniciar_edicion)
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
         self.tree.bind("<Motion>", self._on_tree_motion)
         self.tree.bind("<Leave>", lambda _e: self._clear_tooltip())
 
@@ -259,20 +449,17 @@ class GestionPeticionesUI:
         bottom_bar.grid(row=3, column=0, sticky="ew")
         bottom_bar.grid_columnconfigure(0, weight=1)
 
+        ttk.Button(
+            bottom_bar,
+            text="Responder",
+            command=self.responder_seleccionada,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
         ttk.Button(bottom_bar, text="Exportar CSV", command=self.exportar_csv).grid(
-            row=0, column=0, sticky="w"
+            row=0, column=1, sticky="w"
         )
         ttk.Button(bottom_bar, text="Cerrar", command=self.on_close).grid(
-            row=0, column=1, sticky="e"
+            row=0, column=2, sticky="e"
         )
-
-    def _cerrar_editor(self) -> None:
-        widget = self.editor_state.get("widget")
-        if widget is not None:
-            widget.destroy()
-        self.editor_state = {"widget": None, "item": None, "old": None}
-
-        self._clear_tooltip()
 
     def _clear_tooltip(self) -> None:
         if hasattr(self, "tooltip"):
@@ -280,7 +467,6 @@ class GestionPeticionesUI:
         self._tooltip_state = {"item": None, "text": None}
 
     def _populate_tree(self, rows: List[Dict[str, Any]]) -> None:
-        self._cerrar_editor()
         for item in self.tree.get_children():
             self.tree.delete(item)
         self.tree_items_info.clear()
@@ -299,9 +485,8 @@ class GestionPeticionesUI:
             self.tree_items_info[item_id] = row
 
     def actualizar(self) -> None:
-        self._cerrar_editor()
         try:
-            snapshot = self.db.collection("Peticiones").stream()
+            snapshot = self.db.collection("PeticionesDiaLibre").stream()
         except Exception as e:
             messagebox.showerror("Error", f"No se pudieron leer las peticiones: {e}")
             return
@@ -327,15 +512,68 @@ class GestionPeticionesUI:
                 "uid": uid,
                 "fcmToken": token,
                 "Nombre": nombre or "Falta",
-                "Fecha": data.get("Fecha"),
-                "CreadoEn": data.get("creadoEn"),
-                "Admitido": data.get("Admitido") or "",
-                "Motivo": (data.get("Motivo") or "").strip(),
+                "Fecha": data.get("Fecha") or data.get("fechaSolicitada"),
+                "CreadoEn": data.get("creadoEn") or data.get("creado_en"),
+                "Admitido": data.get("estado") or data.get("Admitido") or data.get("estadoActual") or "",
+                "Motivo": (data.get("Motivo") or data.get("motivo") or "").strip(),
             }
             rows.append(row)
 
         self.data_rows = rows
         self.aplicar_filtros()
+
+    def _obtener_item_seleccionado(self) -> Optional[str]:
+        selection = self.tree.focus()
+        if selection:
+            return selection
+        seleccionados = self.tree.selection()
+        return seleccionados[0] if seleccionados else None
+
+    def responder_seleccionada(self) -> None:
+        item_id = self._obtener_item_seleccionado()
+        if not item_id:
+            messagebox.showinfo("Responder", "Selecciona una petición primero.")
+            return
+        self._responder_item(item_id)
+
+    def _responder_item(self, item_id: str) -> None:
+        if self._operacion_en_progreso:
+            return
+
+        row_info = self.tree_items_info.get(item_id)
+        if not row_info:
+            messagebox.showerror(
+                "Error",
+                "No se encontró la información de la petición seleccionada.",
+            )
+            return
+
+        estado_actual = (row_info.get("Admitido") or "").strip().upper() or "PENDIENTE"
+        if estado_actual != "PENDIENTE":
+            messagebox.showwarning(
+                "Solicitud respondida",
+                "Esta petición ya cuenta con una respuesta registrada.",
+            )
+            return
+
+        self._operacion_en_progreso = True
+        try:
+            responder_peticion(
+                self.window,
+                row_info.get("doc_id") or "",
+                row_info.get("uid") or "",
+                lambda: self.window.after(0, self.actualizar),
+                db_client=self.db,
+                responded_by=RESPONDER_IDENTIDAD,
+            )
+        finally:
+            self._operacion_en_progreso = False
+
+    def _on_tree_double_click(self, event) -> None:
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            return
+        self._responder_item(item_id)
 
     def aplicar_filtros(self, *_args) -> None:
         nombre_filter = (self.ent_nombre.get() or "").strip().lower()
@@ -393,7 +631,7 @@ class GestionPeticionesUI:
         )
         if not path:
             return
-        cols = ["Nombre", "Fecha", "CreadoEn", "Motivo", "Admitido"]
+        cols = ["Nombre", "Fecha", "CreadoEn", "Motivo", "Estado"]
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f, delimiter=";")
             writer.writerow(cols)
@@ -431,89 +669,6 @@ class GestionPeticionesUI:
 
         self._tooltip_state = {"item": item_id, "text": text}
         self.tooltip.show(text, event.x, event.y)
-
-    def _guardar_cambio(self, nuevo_valor: str) -> None:
-        widget = self.editor_state.get("widget")
-        item_id = self.editor_state.get("item")
-        old_value = self.editor_state.get("old") or ""
-        if not widget or not item_id:
-            return
-
-        widget.destroy()
-        self.editor_state = {"widget": None, "item": None, "old": None}
-
-        nuevo_valor = (nuevo_valor or "").strip()
-        if not nuevo_valor or nuevo_valor == old_value:
-            self.tree.set(item_id, "Admitido", old_value)
-            return
-
-        row_info = self.tree_items_info.get(item_id)
-        if not row_info:
-            messagebox.showerror("Error", "No se encontró la información de la petición.")
-            self.tree.set(item_id, "Admitido", old_value)
-            return
-
-        try:
-            self.db.collection("Peticiones").document(row_info["doc_id"]).update({"Admitido": nuevo_valor})
-            fecha_str = _fmt_fecha(row_info.get("Fecha"))
-            enviar_push_resultado(
-                self.db,
-                row_info.get("uid") or "",
-                fecha_str,
-                nuevo_valor,
-                row_info.get("fcmToken"),
-            )
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo actualizar la petición: {e}")
-            self.tree.set(item_id, "Admitido", old_value)
-            return
-
-        row_info["Admitido"] = nuevo_valor
-        self.tree.set(item_id, "Admitido", normalizar_estado(nuevo_valor))
-        self.aplicar_filtros()
-
-    def _iniciar_edicion(self, event) -> None:
-        region = self.tree.identify("region", event.x, event.y)
-        if region != "cell":
-            return
-        column = self.tree.identify_column(event.x)
-        if column != "#5":
-            return
-        item_id = self.tree.identify_row(event.y)
-        if not item_id:
-            return
-
-        bbox = self.tree.bbox(item_id, column)
-        if not bbox:
-            return
-
-        self._cerrar_editor()
-
-        self._clear_tooltip()
-
-        x, y, width, height = bbox
-        current_value = self.tree.set(item_id, "Admitido")
-        combo = ttk.Combobox(
-            self.tree,
-            values=["Ok", "Denegado"],
-            state="readonly",
-        )
-        combo.place(x=x, y=y, width=width, height=height)
-        combo.set(current_value if current_value in ["Ok", "Denegado"] else "Ok")
-        combo.focus_set()
-
-        self.editor_state = {"widget": combo, "item": item_id, "old": current_value}
-
-        def _commit(event=None):
-            self._guardar_cambio(combo.get())
-
-        def _cancel(event=None):
-            self._cerrar_editor()
-
-        combo.bind("<<ComboboxSelected>>", _commit)
-        combo.bind("<FocusOut>", _commit)
-        combo.bind("<Return>", _commit)
-        combo.bind("<Escape>", _cancel)
 
 
 def abrir_gestion_peticiones(db: firestore.Client, sa_path: Optional[str], project_id: Optional[str]) -> None:
