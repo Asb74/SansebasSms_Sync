@@ -1,14 +1,12 @@
 import csv
 import importlib
 import logging
-import os
 import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Dict, List, Optional
 
 from firebase_admin import firestore
-from google.cloud import firestore as _firestore
 
 from thread_utils import run_bg
 from ui_safety import error, info
@@ -88,21 +86,21 @@ def _parse_fecha_text(s: str):
     return None
 
 
-def _actualizar_peticion(db, peticion_id: str, decision: str, *, respondida_por: str | None = None):
-    # decision esperada: "OK" o "Denegada"
-    estado_map = {"OK": "Aprobada", "Denegada": "Denegada"}
-    db.collection("Peticiones").document(peticion_id).update(
-        {
-            "estado": estado_map.get(decision, decision),
-            "respuesta": decision,
-            "fechaRespuesta": _firestore.SERVER_TIMESTAMP,
-            "respondidaPor": respondida_por
-            or os.getenv("USERNAME")
-            or os.getenv("USER")
-            or "sistema",
-        },
-        timeout=30.0,
-    )
+ADMITIDO_OK = "Ok"
+ADMITIDO_NO = "No"
+
+
+def _actualizar_peticion(db, peticion_id: str, decision: str):
+    """
+    decision: "OK" para aprobado desde el diálogo, "Denegada" para denegado.
+    Esta función SOLO actualiza el campo 'Admitido' como en la situación 1.
+    """
+    if decision == "OK":
+        valor = ADMITIDO_OK
+    else:
+        valor = ADMITIDO_NO
+
+    db.collection("Peticiones").document(peticion_id).update({"Admitido": valor}, timeout=30.0)
 
 
 def _texto_notif(nombre: str | None, fecha: str | None, decision: str) -> tuple[str, str]:
