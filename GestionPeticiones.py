@@ -1,6 +1,8 @@
 import csv
+import importlib
 import logging
 import os
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Dict, List, Optional
@@ -11,12 +13,24 @@ from google.cloud import firestore as _firestore
 from thread_utils import run_bg
 from ui_safety import error, info
 
-from main import (
-    _is_valid_fcm_token,
-    enviar_fcm,
-    get_doc_safe,
-    obtener_token_oauth,
-)
+_main_module = sys.modules.get("main")
+if _main_module is None:
+    candidate = sys.modules.get("__main__")
+    if (
+        candidate is None
+        or not hasattr(candidate, "_is_valid_fcm_token")
+        or not hasattr(candidate, "enviar_fcm")
+        or not hasattr(candidate, "get_doc_safe")
+        or not hasattr(candidate, "obtener_token_oauth")
+    ):
+        _main_module = importlib.import_module("main")
+    else:
+        _main_module = candidate
+
+_is_valid_fcm_token = getattr(_main_module, "_is_valid_fcm_token")
+enviar_fcm = getattr(_main_module, "enviar_fcm")
+get_doc_safe = getattr(_main_module, "get_doc_safe")
+obtener_token_oauth = getattr(_main_module, "obtener_token_oauth")
 
 try:
     from tkcalendar import DateEntry
