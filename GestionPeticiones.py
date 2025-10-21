@@ -87,7 +87,7 @@ def _parse_fecha_text(s: str):
 
 
 ADMITIDO_OK = "Ok"
-ADMITIDO_NO = "No"
+ADMITIDO_NO = "Denegada"
 
 
 def _actualizar_peticion(db, peticion_id: str, decision: str):
