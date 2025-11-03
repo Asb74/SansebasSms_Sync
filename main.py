@@ -252,6 +252,14 @@ def abrir_gestion_peticiones(db):
     abrir(db, sa_path, project_id)
 
 
+def abrir_informes():
+    from Informes import abrir_informes as abrir
+
+    sa_path = credenciales_dinamicas.get("ruta")
+    project_id = project_info.get("id")
+    abrir(db, sa_path, project_id)
+
+
 def obtener_token_oauth():
     try:
         creds = service_account.Credentials.from_service_account_file(
@@ -643,6 +651,7 @@ tk.Button(frame, text="📲 Enviar notificaciones push", command=enviar_notifica
 tk.Button(frame, text="👥 Gestionar Usuarios", command=lambda: abrir_gestion_usuarios(db), height=2, width=40, bg="lightyellow").pack(pady=5)
 tk.Button(frame, text="📜 Gestionar Mensajes", command=lambda: abrir_gestion_mensajes(db), height=2, width=40).pack(pady=5)
 tk.Button(frame, text="Peticiones de Días Libres", command=lambda: abrir_gestion_peticiones(db), height=2, width=40).pack(pady=5)
+tk.Button(frame, text="📊 Informe", command=abrir_informes, height=2, width=40).pack(pady=5)
 tk.Button(frame, text="🆕 Generar mensajes", command=lambda: abrir_generar_mensajes(db), height=2, width=40).pack(pady=5)
 
 
