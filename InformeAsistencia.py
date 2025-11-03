@@ -735,7 +735,7 @@ def _generar_bg(fecha: date, tipo: str) -> None:
                     if _es_error_tabla_inexistente(exc):
                         raise _crear_error_tabla_inexistente(conn) from exc
                     raise
-            asiste = "SI" if presente else "NO"
+            asiste_texto = "SI" if presente else "NO"
 
             fila = {
                 "Fecha": fecha_texto,
@@ -745,7 +745,7 @@ def _generar_bg(fecha: date, tipo: str) -> None:
                 "Nombre": nombre,
                 "Turno": turno,
                 "Codigo": codigo if codigo != "N/D" else "N/D",
-                "Asiste": asiste,
+                "Asiste": asiste_texto,
             }
             filas_llamados.append(fila)
 
