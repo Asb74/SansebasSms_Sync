@@ -345,14 +345,14 @@ def _cargar_tipos_async() -> None:
     run_bg(_worker, _thread_name="tipos_informe_asistencia")
 
 
-def _programar(fn) -> None:
+def _programar(fn, *args, **kwargs) -> None:
     if _ventana is not None and _ventana.winfo_exists():
-        _ventana.after(0, fn)
+        _ventana.after(0, fn, *args, **kwargs)
     else:
         try:
-            tk._default_root.after(0, fn)  # type: ignore[attr-defined]
+            tk._default_root.after(0, fn, *args, **kwargs)  # type: ignore[attr-defined]
         except Exception:
-            fn()
+            fn(*args, **kwargs)
 
 
 def _log_firestore_context(db: Optional[firestore.Client]) -> None:
@@ -587,13 +587,13 @@ def _generar_bg(fecha: date, tipo: str) -> None:
         _programar(_aplicar)
 
     except Exception as exc:
+        _programar(_notificar, exc)
 
-        def _notificar() -> None:
-            if _btn_generar is not None:
-                _btn_generar.configure(state=tk.NORMAL)
-            _mostrar_error(exc)
 
-        _programar(_notificar)
+def _notificar(exc: Exception) -> None:
+    if _btn_generar is not None:
+        _btn_generar.configure(state=tk.NORMAL)
+    _mostrar_error(exc)
 
 
 def _actualizar_treeviews() -> None:
