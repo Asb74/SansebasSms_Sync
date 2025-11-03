@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "Mensajes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "mensaje", "order": "ASCENDING" },
+        { "fieldPath": "fechaHora", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

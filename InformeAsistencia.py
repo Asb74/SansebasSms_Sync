@@ -343,6 +343,27 @@ def _programar(fn) -> None:
             fn()
 
 
+def _mostrar_error(exc: Exception) -> None:
+    import logging
+    import webbrowser
+
+    logging.exception("Error generando informe de asistencia", exc_info=exc)
+    msg = str(exc)
+    url = None
+    for token in msg.split():
+        if token.startswith("https://") and "firestore/indexes?create_composite" in token:
+            url = token
+            break
+    if url:
+        if messagebox.askyesno(
+            "Informe",
+            "La consulta requiere un índice en Firestore.\n¿Abrir página para crearlo?",
+        ):
+            webbrowser.open(url)
+    else:
+        messagebox.showerror("Informe", f"No se pudo generar el informe:\n\n{msg}")
+
+
 def _generar() -> None:
     if _db is None:
         messagebox.showerror("Informe", "No hay conexión a Firestore.")
@@ -493,14 +514,13 @@ def _generar_bg(fecha: date, tipo: str) -> None:
         _programar(_aplicar)
 
     except Exception as exc:
-        logger.exception("Error generando informe de asistencia")
 
-        def _mostrar_error() -> None:
+        def _notificar() -> None:
             if _btn_generar is not None:
                 _btn_generar.configure(state=tk.NORMAL)
-            messagebox.showerror("Informe", f"No se pudo generar el informe: {exc}")
+            _mostrar_error(exc)
 
-        _programar(_mostrar_error)
+        _programar(_notificar)
 
 
 def _actualizar_treeviews() -> None:
@@ -581,7 +601,7 @@ def get_mensajes(
         .where(filter=FieldFilter("fechaHora", "<", fin))
         .where(filter=FieldFilter("mensaje", "==", tipo))
     )
-    documentos = consulta.stream()
+    documentos = list(consulta.stream())
     resultados: List[Dict[str, Any]] = []
     for doc in documentos:
         datos = doc.to_dict() or {}
