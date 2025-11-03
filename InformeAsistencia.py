@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
+import webbrowser
 from datetime import date, datetime, time as time_cls, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -26,6 +27,7 @@ except Exception:  # pragma: no cover - pyodbc opcional
     pyodbc = None  # type: ignore
 
 from firebase_admin import firestore
+from google.api_core.exceptions import FailedPrecondition
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from GestionUsuarios import ACCESS_DB_PATH
@@ -62,6 +64,7 @@ _date_var: Optional[tk.StringVar] = None
 _tipo_var: Optional[tk.StringVar] = None
 _tipo_combo: Optional[ttk.Combobox] = None
 _btn_generar: Optional[ttk.Button] = None
+_btn_probar_indice: Optional[ttk.Button] = None
 _tree_llamados: Optional[ttk.Treeview] = None
 _tree_sin_mensaje: Optional[ttk.Treeview] = None
 
@@ -103,7 +106,7 @@ def abrir_informe_asistencia(
 
     def _al_cerrar() -> None:
         global _ventana, _date_widget, _date_var, _tipo_var, _tipo_combo
-        global _tree_llamados, _tree_sin_mensaje, _btn_generar
+        global _tree_llamados, _tree_sin_mensaje, _btn_generar, _btn_probar_indice
         global _datos_llamados, _datos_sin_mensaje, _fecha_actual
 
         if _ventana is not None:
@@ -119,6 +122,7 @@ def abrir_informe_asistencia(
         _tree_llamados = None
         _tree_sin_mensaje = None
         _btn_generar = None
+        _btn_probar_indice = None
         _datos_llamados = []
         _datos_sin_mensaje = []
         _fecha_actual = None
@@ -128,6 +132,7 @@ def abrir_informe_asistencia(
 
 def _construir_ui(root: tk.Toplevel) -> None:
     global _date_widget, _date_var, _tipo_var, _tipo_combo, _btn_generar
+    global _btn_probar_indice
     global _tree_llamados, _tree_sin_mensaje
 
     root.grid_rowconfigure(1, weight=1)
@@ -162,6 +167,13 @@ def _construir_ui(root: tk.Toplevel) -> None:
 
     _btn_generar = ttk.Button(filtros, text="Generar", command=_generar)
     _btn_generar.grid(row=0, column=4, sticky="w")
+
+    _btn_probar_indice = ttk.Button(
+        filtros,
+        text="Probar índice",
+        command=_probar_indice,
+    )
+    _btn_probar_indice.grid(row=0, column=5, sticky="w", padx=(6, 0))
 
     cuerpo = ttk.Frame(root, padding=(18, 0, 18, 18))
     cuerpo.grid(row=1, column=0, sticky="nsew")
@@ -343,17 +355,29 @@ def _programar(fn) -> None:
             fn()
 
 
-def _mostrar_error(exc: Exception) -> None:
-    import logging
-    import webbrowser
+def _log_firestore_context(db: Optional[firestore.Client]) -> None:
+    """Loggea información básica del cliente de Firestore."""
 
-    logging.exception("Error generando informe de asistencia", exc_info=exc)
+    if db is None:
+        logger.warning("Firestore client not provided for informe de asistencia")
+        return
+
+    project = getattr(db, "project", None)
+    logger.info("Informe asistencia usando proyecto Firestore: %s", project)
+
+
+def _extraer_url_indice(exc: Exception) -> Optional[str]:
     msg = str(exc)
-    url = None
     for token in msg.split():
         if token.startswith("https://") and "firestore/indexes?create_composite" in token:
-            url = token
-            break
+            return token
+    return None
+
+
+def _mostrar_error(exc: Exception) -> None:
+    logging.exception("Error generando informe de asistencia", exc_info=exc)
+    msg = str(exc)
+    url = _extraer_url_indice(exc)
     if url:
         if messagebox.askyesno(
             "Informe",
@@ -385,6 +409,54 @@ def _generar() -> None:
         lambda: _generar_bg(fecha, tipo),
         _thread_name="generar_informe_asistencia",
     )
+
+
+def _probar_indice() -> None:
+    if _db is None:
+        messagebox.showerror("Informe", "No hay conexión a Firestore.")
+        return
+
+    fecha = _obtener_fecha()
+    if fecha is None:
+        return
+
+    tipo = (_tipo_var.get().strip() if _tipo_var else "")
+    if not tipo:
+        messagebox.showwarning("Informe", "Selecciona un tipo de mensaje.")
+        return
+
+    if _btn_probar_indice is not None:
+        _btn_probar_indice.configure(state=tk.DISABLED)
+
+    def _worker() -> None:
+        try:
+            tz_local = datetime.now().astimezone().tzinfo or timezone.utc
+            day_start = datetime.combine(fecha, time_cls.min).replace(tzinfo=tz_local)
+            day_end = day_start + timedelta(days=1)
+
+            _log_firestore_context(_db)
+            mensajes = get_mensajes(_db, day_start, day_end, tipo)
+
+            def _ok() -> None:
+                if _btn_probar_indice is not None:
+                    _btn_probar_indice.configure(state=tk.NORMAL)
+                messagebox.showinfo(
+                    "Informe",
+                    f"Consulta exitosa. Mensajes encontrados: {len(mensajes)}",
+                )
+
+            _programar(_ok)
+        except Exception as exc:
+            logger.exception("Error al probar el índice de Firestore", exc_info=exc)
+
+            def _fail() -> None:
+                if _btn_probar_indice is not None:
+                    _btn_probar_indice.configure(state=tk.NORMAL)
+                messagebox.showerror("Informe", f"Error al probar el índice:\n\n{exc}")
+
+            _programar(_fail)
+
+    run_bg(_worker, _thread_name="probar_indice_informe_asistencia")
 
 
 def _obtener_fecha() -> Optional[date]:
@@ -424,6 +496,7 @@ def _generar_bg(fecha: date, tipo: str) -> None:
         fecha_texto = fecha.strftime("%d-%m-%Y")
         fecha_yyyymmdd = fecha.strftime("%Y%m%d")
 
+        _log_firestore_context(_db)
         mensajes = get_mensajes(_db, day_start, day_end, tipo)
         usuarios_map = get_usuarios_map(_db)
         usuarios_por_codigo = get_usuarios_por_codigo(usuarios_map)
@@ -601,7 +674,16 @@ def get_mensajes(
         .where(filter=FieldFilter("fechaHora", "<", fin))
         .where(filter=FieldFilter("mensaje", "==", tipo))
     )
-    documentos = list(consulta.stream())
+    try:
+        documentos = list(consulta.stream())
+    except FailedPrecondition as exc:
+        url = _extraer_url_indice(exc)
+        if url:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                logger.exception("No se pudo abrir el navegador para el índice requerido")
+        raise
     resultados: List[Dict[str, Any]] = []
     for doc in documentos:
         datos = doc.to_dict() or {}
