@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
 import webbrowser
 from datetime import date, datetime, time as time_cls, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import tkinter as tk
@@ -26,14 +28,35 @@ try:  # pragma: no cover - pyodbc puede no estar disponible
 except Exception:  # pragma: no cover - pyodbc opcional
     pyodbc = None  # type: ignore
 
+if pyodbc is not None:
+    ProgrammingError = pyodbc.ProgrammingError
+else:  # pragma: no cover - pyodbc ausente
+    class ProgrammingError(Exception):
+        pass
+
 from firebase_admin import firestore
 from google.api_core.exceptions import FailedPrecondition
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from GestionUsuarios import ACCESS_DB_PATH
 from thread_utils import run_bg
 
 logger = logging.getLogger(__name__)
+
+
+CONFIG_PATH = Path("config.json")
+
+
+class TablaFichajesNoEncontradaError(RuntimeError):
+    """Excepción usada cuando la tabla de fichajes no está disponible."""
+
+    def __init__(self, mensaje: str) -> None:
+        super().__init__(mensaje)
+        self.already_notified = True
+
+
+_cfg_cache: Optional[Dict[str, Any]] = None
+_conn_fich: Optional[Any] = None
+_conn_fich_path: Optional[str] = None
 
 
 _COLUMNAS_LLAMADOS: Sequence[str] = (
@@ -73,6 +96,121 @@ _datos_sin_mensaje: List[Dict[str, Any]] = []
 _fecha_actual: Optional[date] = None
 
 
+def _load_cfg() -> Dict[str, Any]:
+    global _cfg_cache
+    if _cfg_cache is not None:
+        return _cfg_cache
+
+    if not CONFIG_PATH.exists():
+        logger.warning("Archivo de configuración no encontrado: %s", CONFIG_PATH)
+        _cfg_cache = {}
+        return _cfg_cache
+
+    try:
+        with CONFIG_PATH.open("r", encoding="utf-8") as fh:
+            _cfg_cache = json.load(fh)
+    except Exception:
+        logger.exception("No se pudo leer la configuración desde %s", CONFIG_PATH)
+        _cfg_cache = {}
+    return _cfg_cache
+
+
+def open_access_conn(db_path: str):
+    """Abre una conexión a un archivo Access usando pyodbc."""
+
+    if pyodbc is None:
+        raise RuntimeError("pyodbc no está disponible. Instálalo para consultar Access.")
+
+    ruta = (db_path or "").strip()
+    if not ruta:
+        raise RuntimeError("No se configuró la ruta de la base de datos de fichajes.")
+    if not os.path.exists(ruta):
+        raise FileNotFoundError(f"No se encontró la base de datos Access en {ruta}")
+
+    conn_str = (
+        r"DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};"
+        f"DBQ={ruta};"
+    )
+    return pyodbc.connect(conn_str)
+
+
+def list_tables(conn: Optional[Any]) -> List[str]:
+    """Devuelve la lista de tablas disponibles en la conexión Access."""
+
+    if pyodbc is None or conn is None:
+        return []
+
+    tablas: List[str] = []
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        for row in cursor.tables(tableType="TABLE"):
+            nombre = getattr(row, "table_name", None)
+            if nombre:
+                tablas.append(str(nombre))
+    except Exception:
+        logger.exception("No se pudieron listar las tablas de la base de datos de fichajes")
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+    return tablas
+
+
+def _abrir_conexion_fichajes() -> None:
+    """Abre la conexión configurada para la base de datos de fichajes."""
+
+    global _conn_fich, _conn_fich_path
+
+    cfg = _load_cfg()
+    ruta = str(cfg.get("access_fichajes_mdb") or "").strip()
+
+    if pyodbc is None:
+        logger.warning("pyodbc no está disponible; no se abrirá la base de datos de fichajes")
+        _conn_fich = None
+        _conn_fich_path = ruta or None
+        return
+
+    if _conn_fich is not None:
+        try:
+            _conn_fich.close()
+        except Exception:
+            pass
+        _conn_fich = None
+
+    if not ruta:
+        logger.warning("Ruta de base de datos de fichajes no configurada en config.json")
+        _conn_fich_path = None
+        return
+
+    try:
+        _conn_fich = open_access_conn(ruta)
+    except Exception:
+        _conn_fich_path = ruta
+        raise
+
+    _conn_fich_path = ruta
+
+    tablas = list_tables(_conn_fich)
+    resumen = ", ".join(tablas[:30]) if tablas else "(sin tablas)"
+    if len(tablas) > 30:
+        resumen += ", ..."
+    logger.info("Tablas disponibles en %s: %s", ruta, resumen)
+
+
+def _cerrar_conexion_fichajes() -> None:
+    global _conn_fich, _conn_fich_path
+    if _conn_fich is not None:
+        try:
+            _conn_fich.close()
+        except Exception:
+            pass
+    _conn_fich = None
+    _conn_fich_path = None
+
+
 def abrir_informe_asistencia(
     db: firestore.Client,
     sa_path: Optional[str] = None,
@@ -104,6 +242,15 @@ def abrir_informe_asistencia(
     _construir_ui(_ventana)
     _cargar_tipos_async()
 
+    try:
+        _abrir_conexion_fichajes()
+    except Exception as exc:
+        logger.exception("No se pudo abrir la base de datos de fichajes")
+        messagebox.showerror(
+            "Informe",
+            f"No se pudo abrir la base de datos de fichajes:\n\n{exc}",
+        )
+
     def _al_cerrar() -> None:
         global _ventana, _date_widget, _date_var, _tipo_var, _tipo_combo
         global _tree_llamados, _tree_sin_mensaje, _btn_generar, _btn_probar_indice
@@ -126,6 +273,7 @@ def abrir_informe_asistencia(
         _datos_llamados = []
         _datos_sin_mensaje = []
         _fecha_actual = None
+        _cerrar_conexion_fichajes()
 
     _ventana.protocol("WM_DELETE_WINDOW", _al_cerrar)
 
@@ -355,6 +503,36 @@ def _programar(fn, *args, **kwargs) -> None:
             fn(*args, **kwargs)
 
 
+def _es_error_tabla_inexistente(exc: Exception) -> bool:
+    mensaje = str(exc).upper()
+    if "FICHAJES001" not in mensaje:
+        return False
+    return (
+        "CANNOT FIND" in mensaje
+        or "COULD NOT FIND" in mensaje
+        or "NO SE ENCUENTRA" in mensaje
+        or "NO SE ENCONTR" in mensaje
+    )
+
+
+def _crear_error_tabla_inexistente(conn: Optional[Any]) -> TablaFichajesNoEncontradaError:
+    tablas = list_tables(conn)[:30]
+    tablas_texto = "\n".join(tablas) if tablas else "(sin tablas)"
+    ruta = _conn_fich_path or "(ruta no configurada)"
+    mensaje = (
+        "No se encontró la tabla FICHAJES001 en la base de datos de fichajes.\n\n"
+        f"Archivo: {ruta}\n\n"
+        "Tablas disponibles (primeras 30):\n"
+        f"{tablas_texto}"
+    )
+
+    def _mostrar() -> None:
+        messagebox.showerror("Informe", mensaje)
+
+    _programar(_mostrar)
+    return TablaFichajesNoEncontradaError(mensaje)
+
+
 def _log_firestore_context(db: Optional[firestore.Client]) -> None:
     """Loggea información básica del cliente de Firestore."""
 
@@ -376,6 +554,8 @@ def _extraer_url_indice(exc: Exception) -> Optional[str]:
 
 def _mostrar_error(exc: Exception) -> None:
     logging.exception("Error generando informe de asistencia", exc_info=exc)
+    if getattr(exc, "already_notified", False):
+        return
     msg = str(exc)
     url = _extraer_url_indice(exc)
     if url:
@@ -487,8 +667,21 @@ def _generar_bg(fecha: date, tipo: str) -> None:
     try:
         if pyodbc is None:
             raise RuntimeError("pyodbc no está disponible. Instálalo para consultar Access.")
-        if not ACCESS_DB_PATH or not os.path.exists(ACCESS_DB_PATH):
-            raise RuntimeError(f"No se encontró la base de datos Access en {ACCESS_DB_PATH}")
+        conn = _conn_fich
+        if conn is None or getattr(conn, "closed", False):
+            if _conn_fich_path:
+                try:
+                    _abrir_conexion_fichajes()
+                    conn = _conn_fich
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"No se pudo abrir la base de datos de fichajes en {_conn_fich_path}: {exc}"
+                    ) from exc
+            else:
+                raise RuntimeError("No se configuró la ruta de la base de datos de fichajes.")
+
+        if conn is None:
+            raise RuntimeError("No se pudo acceder a la base de datos de fichajes.")
 
         tz_local = datetime.now().astimezone().tzinfo or timezone.utc
         day_start = datetime.combine(fecha, time_cls.min).replace(tzinfo=tz_local)
@@ -501,17 +694,12 @@ def _generar_bg(fecha: date, tipo: str) -> None:
         usuarios_map = get_usuarios_map(_db)
         usuarios_por_codigo = get_usuarios_por_codigo(usuarios_map)
 
-        conn = pyodbc.connect(
-            r"DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};" f"DBQ={ACCESS_DB_PATH};"
-        )
         try:
-            cursor = conn.cursor()
-            try:
-                presentes = get_codigos_presentes(fecha_yyyymmdd, cursor)
-            finally:
-                cursor.close()
-        finally:
-            conn.close()
+            presentes = get_codigos_presentes(fecha_yyyymmdd, conn)
+        except ProgrammingError as exc:
+            if _es_error_tabla_inexistente(exc):
+                raise _crear_error_tabla_inexistente(conn) from exc
+            raise
 
         filas_llamados: List[Dict[str, Any]] = []
         codigos_con_mensaje: set[str] = set()
@@ -539,7 +727,15 @@ def _generar_bg(fecha: date, tipo: str) -> None:
             codigo_valido = codigo if codigo != "N/D" else None
             if codigo_valido:
                 codigos_con_mensaje.add(codigo_valido)
-            asiste = "SI" if codigo_valido and codigo_valido in presentes else "NO"
+            presente = False
+            if codigo_valido:
+                try:
+                    presente = asiste(codigo_valido, fecha_yyyymmdd, conn)
+                except ProgrammingError as exc:
+                    if _es_error_tabla_inexistente(exc):
+                        raise _crear_error_tabla_inexistente(conn) from exc
+                    raise
+            asiste = "SI" if presente else "NO"
 
             fila = {
                 "Fecha": fecha_texto,
@@ -715,15 +911,28 @@ def get_usuarios_por_codigo(
     return indice
 
 
-def get_codigos_presentes(fecha: str, cursor: Optional[pyodbc.Cursor]) -> set[str]:
-    if cursor is None:
+def get_codigos_presentes(fecha: str, conn: Optional[Any]) -> set[str]:
+    if pyodbc is None or conn is None:
         return set()
-    cursor.execute(
-        "SELECT DISTINCT IdEmpleado FROM FICHAJES001 WHERE Fecha = ?",
-        fecha,
-    )
-    filas = cursor.fetchall()
-    presentes = set()
+
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT [IdEmpleado] FROM [FICHAJES001] WHERE [Fecha] = ?",
+            fecha,
+        )
+        filas = cursor.fetchall()
+    except ProgrammingError:
+        raise
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+    presentes: set[str] = set()
     for fila in filas:
         valor = fila[0]
         if valor is not None:
@@ -731,6 +940,29 @@ def get_codigos_presentes(fecha: str, cursor: Optional[pyodbc.Cursor]) -> set[st
             if codigo:
                 presentes.add(codigo)
     return presentes
+
+
+def asiste(codigo: str, fecha: str, conn: Optional[Any]) -> bool:
+    if pyodbc is None or conn is None:
+        return False
+
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT TOP 1 1 FROM [FICHAJES001] WHERE [Fecha] = ? AND [IdEmpleado] = ?",
+            fecha,
+            codigo,
+        )
+        return cursor.fetchone() is not None
+    except ProgrammingError:
+        raise
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
 
 
 def exportar_treeview_csv(columnas: Sequence[str], datos: Iterable[Dict[str, Any]], ruta: str) -> None:
