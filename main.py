@@ -651,7 +651,7 @@ tk.Button(frame, text="📲 Enviar notificaciones push", command=enviar_notifica
 tk.Button(frame, text="👥 Gestionar Usuarios", command=lambda: abrir_gestion_usuarios(db), height=2, width=40, bg="lightyellow").pack(pady=5)
 tk.Button(frame, text="📜 Gestionar Mensajes", command=lambda: abrir_gestion_mensajes(db), height=2, width=40).pack(pady=5)
 tk.Button(frame, text="Peticiones de Días Libres", command=lambda: abrir_gestion_peticiones(db), height=2, width=40).pack(pady=5)
-tk.Button(frame, text="📊 Informe", command=abrir_informes, height=2, width=40).pack(pady=5)
+tk.Button(frame, text="Informe", command=abrir_informes, height=2, width=40).pack(pady=5)
 tk.Button(frame, text="🆕 Generar mensajes", command=lambda: abrir_generar_mensajes(db), height=2, width=40).pack(pady=5)
 
 
