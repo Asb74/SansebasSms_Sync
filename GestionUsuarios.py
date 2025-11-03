@@ -378,6 +378,31 @@ def _normalize_optional_str(value: Optional[Union[str, date]]) -> Optional[str]:
     return texto or None
 
 
+def dias_sin_trabajar(ultimo_dia: Optional[Union[str, date, dt.datetime]]) -> int:
+    """Calcula los días transcurridos desde ``ultimo_dia`` hasta hoy."""
+
+    hoy = date.today()
+    if not ultimo_dia:
+        return 999
+
+    if isinstance(ultimo_dia, str):
+        parsed = to_date(ultimo_dia)
+    elif isinstance(ultimo_dia, dt.datetime):
+        parsed = ultimo_dia.date()
+    elif isinstance(ultimo_dia, date):
+        parsed = ultimo_dia
+    else:
+        parsed = to_date(ultimo_dia)
+
+    if not parsed:
+        return 999
+
+    try:
+        return (hoy - parsed).days
+    except Exception:
+        return 999
+
+
 def _to_int_safe(value: Union[str, int, float, Decimal, None], default: int = 0) -> int:
     if value is None:
         return default
@@ -756,6 +781,8 @@ def abrir_gestion_usuarios(db):
 
     tree.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
     tree.tag_configure("has_days_row", foreground="#b00020")
+    tree.tag_configure("inactivo_3", foreground="#b35900")
+    tree.tag_configure("inactivo_7", foreground="#3b0066")
 
     frame_status = ttk.Frame(ventana)
     frame_status.grid(row=3, column=0, sticky="ew")
@@ -781,6 +808,22 @@ def abrir_gestion_usuarios(db):
                 valor = formatear_nombre(row.get("UID", ""), valor)
             valores.append(valor)
         return valores
+
+    def _row_tags(uid: str, row: dict) -> tuple[str, ...]:
+        tags: list[str] = []
+        if uid in upcoming_by_uid:
+            tags.append("has_days_row")
+        dias = dias_sin_trabajar(row.get("UltimoDia"))
+        if dias > 7:
+            tags.append("inactivo_7")
+        elif dias > 3:
+            tags.append("inactivo_3")
+        return tuple(tags)
+
+    def _apply_row_tags(uid: str, row: dict | None) -> None:
+        if not row or not tree.exists(uid):
+            return
+        tree.item(uid, tags=_row_tags(uid, row))
 
     def _hide_cal_popup():
         nonlocal cal_popup, cal_uid
@@ -961,7 +1004,7 @@ def abrir_gestion_usuarios(db):
             if visible:
                 uid_row = row["UID"]
                 valores = row_to_values(row)
-                tags = ("has_days_row",) if uid_row in upcoming_by_uid else ()
+                tags = _row_tags(uid_row, row)
                 tree.insert("", "end", iid=uid_row, values=valores, tags=tags)
                 rows_by_iid[uid_row] = row
         toggle_seleccionar_todos()
@@ -1032,6 +1075,8 @@ def abrir_gestion_usuarios(db):
                         break
                 if item_id in rows_by_iid:
                     rows_by_iid[item_id][col_nombre] = nuevo_valor
+                    if col_nombre == "UltimoDia":
+                        _apply_row_tags(item_id, rows_by_iid[item_id])
                 entry.destroy()
 
             entry.bind("<Return>", guardar_valor)
@@ -1258,7 +1303,7 @@ def abrir_gestion_usuarios(db):
             datos_originales.append(fila)
             rows_by_iid[uid] = fila
             valores = row_to_values(fila)
-            tags = ("has_days_row",) if uid in upcoming_by_uid else ()
+            tags = _row_tags(uid, fila)
             tree.insert("", "end", iid=uid, values=valores, tags=tags)
             if idx % 200 == 0:
                 print(f"Procesados {idx}/{total}")
