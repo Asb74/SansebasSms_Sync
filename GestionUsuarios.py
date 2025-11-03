@@ -8,7 +8,7 @@ import datetime as dt
 from datetime import date, timedelta, timezone
 import re
 from decimal import Decimal
-from typing import Optional, Union, Dict, Iterable, Tuple, List
+from typing import Optional, Union, Dict, Iterable, Tuple, List, Any
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -94,6 +94,170 @@ def parse_access_date(raw) -> date | None:
                 pass
         return parse_baja_texto_largo(raw)
     return None
+
+
+# Ruta y utilidades Access
+ACCESS_DB_PATH = r"X:\\ENLACES\\Power BI\\Campaña\\PercecoBi(Campaña).mdb"
+
+
+def _open_access_connection() -> Optional[pyodbc.Connection]:
+    if not os.path.exists(ACCESS_DB_PATH):
+        print("❌ Ruta MDB no encontrada.")
+        return None
+    conn_str = (
+        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};'
+        f'DBQ={ACCESS_DB_PATH};'
+    )
+    try:
+        return pyodbc.connect(str(conn_str))
+    except Exception as exc:
+        print(f"❌ Error abriendo MDB: {exc}")
+        return None
+
+
+def _ensure_cursor(cursor: Optional[pyodbc.Cursor]) -> Tuple[Optional[pyodbc.Cursor], Optional[pyodbc.Connection]]:
+    if cursor is not None:
+        return cursor, None
+    conn = _open_access_connection()
+    if not conn:
+        return None, None
+    return conn.cursor(), conn
+
+
+def _close_cursor(cursor: Optional[pyodbc.Cursor], conn: Optional[pyodbc.Connection]) -> None:
+    if cursor is not None:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _range_start(d: date) -> dt.datetime:
+    return dt.datetime.combine(d, dt.time.min)
+
+
+def _range_end(d: date) -> dt.datetime:
+    return dt.datetime.combine(d, dt.time(23, 59, 59))
+
+
+def get_trabajador_por_dni_y_centro(
+    dni: str,
+    centro: str = "00005",
+    cursor: Optional[pyodbc.Cursor] = None,
+) -> Optional[Any]:
+    dni_param = (dni or "").strip().upper()
+    if not dni_param:
+        return None
+    local_cursor, conn = _ensure_cursor(cursor)
+    if local_cursor is None:
+        return None
+    try:
+        query = (
+            "SELECT TOP 1 DNI, CODIGO, FECHAALTA, FECHABAJA, SEXO, APELLIDOS, APELLIDOS2, NOMBRE "
+            "FROM TRABAJADORES "
+            "WHERE Trim(UCase(DNI)) = ? AND CENTRO = ? "
+            "ORDER BY FECHAALTA DESC"
+        )
+        row = local_cursor.execute(query, (dni_param, centro)).fetchone()
+        if row is None:
+            print(f"[TRAB] DNI={dni_param} centro={centro} no encontrado")
+        else:
+            alta = parse_access_date(getattr(row, "FECHAALTA", None))
+            baja = parse_access_date(getattr(row, "FECHABAJA", None))
+            print(
+                f"[TRAB] DNI={dni_param} centro={centro} alta={fmt_dmy(alta)} baja={fmt_dmy(baja)}"
+            )
+        return row
+    except Exception as exc:
+        print(f"❌ Error obteniendo trabajador {dni_param} centro={centro}: {exc}")
+        return None
+    finally:
+        if cursor is None:
+            _close_cursor(local_cursor, conn)
+
+
+def contar_dias_distintos(
+    dni: str,
+    desde: date,
+    hasta: date,
+    cursor: Optional[pyodbc.Cursor] = None,
+) -> int:
+    if not dni or not desde or not hasta or desde > hasta:
+        return 0
+    dni_param = dni.strip().upper()
+    local_cursor, conn = _ensure_cursor(cursor)
+    if local_cursor is None:
+        return 0
+    try:
+        query = (
+            "SELECT COUNT(*) AS total_dias FROM ("
+            "  SELECT DISTINCT FECHA"
+            "  FROM DATOS_AJUSTADOS"
+            "  WHERE Trim(UCase(DNI)) = ? AND FECHA >= ? AND FECHA <= ?"
+            ") t"
+        )
+        params = (dni_param, _range_start(desde), _range_end(hasta))
+        row = local_cursor.execute(query, params).fetchone()
+        return int(row[0] or 0) if row else 0
+    except Exception as exc:
+        print(
+            f"⚠️ Error contando días para {dni_param} entre {desde} y {hasta}: {exc}"
+        )
+        return 0
+    finally:
+        if cursor is None:
+            _close_cursor(local_cursor, conn)
+
+
+def sumar_horas(
+    dni: str,
+    desde: date,
+    hasta: date,
+    cursor: Optional[pyodbc.Cursor] = None,
+) -> float:
+    if not dni or not desde or not hasta or desde > hasta:
+        return 0.0
+    dni_param = dni.strip().upper()
+    local_cursor, conn = _ensure_cursor(cursor)
+    if local_cursor is None:
+        return 0.0
+    try:
+        query = (
+            "SELECT SUM(NZ(HORAS,0) + NZ(HORASEXT,0)) AS total_horas "
+            "FROM DATOS_AJUSTADOS "
+            "WHERE Trim(UCase(DNI)) = ? AND FECHA >= ? AND FECHA <= ?"
+        )
+        params = (dni_param, _range_start(desde), _range_end(hasta))
+        row = local_cursor.execute(query, params).fetchone()
+        if row and row[0] is not None:
+            return float(row[0])
+    except Exception:
+        try:
+            fallback_query = (
+                "SELECT HORAS, HORASEXT FROM DATOS_AJUSTADOS "
+                "WHERE Trim(UCase(DNI)) = ? AND FECHA >= ? AND FECHA <= ?"
+            )
+            total = 0.0
+            for fila in local_cursor.execute(
+                fallback_query, (dni_param, _range_start(desde), _range_end(hasta))
+            ):
+                horas = getattr(fila, "HORAS", 0)
+                horas_ext = getattr(fila, "HORASEXT", 0)
+                total += float(horas or 0) + float(horas_ext or 0)
+            return total
+        except Exception as exc_inner:
+            print(
+                f"⚠️ Error sumando horas para {dni_param} entre {desde} y {hasta}: {exc_inner}"
+            )
+    finally:
+        if cursor is None:
+            _close_cursor(local_cursor, conn)
+    return 0.0
 
 
 # Ventana principal de gestión de usuarios (singleton)
@@ -264,47 +428,44 @@ def _chunk_iterable(iterable: Iterable, size: int):
 
 def cargar_trabajadores(dnis: Iterable[str]) -> Dict[str, Dict[str, Optional[Union[str, date]]]]:
     """Lectura única de TRABAJADORES, retornando dict por DNI."""
-    ruta = r'X:\ENLACES\Power BI\Campaña\PercecoBi(Campaña).mdb'
     resultado: Dict[str, Dict[str, Optional[Union[str, date]]]] = {}
-    if not os.path.exists(ruta):
-        print("❌ Ruta MDB no encontrada.")
+    conn = _open_access_connection()
+    if not conn:
         return resultado
 
-    conn_str = (
-        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};'
-        f'DBQ={ruta};'
-    )
-    columnas = "DNI, CODIGO, FECHAALTA, FECHABAJA, SEXO, APELLIDOS, APELLIDOS2, NOMBRE"
     try:
-        conn = pyodbc.connect(str(conn_str))
         cursor = conn.cursor()
-        for bloque in _chunk_iterable(list(dnis), 1000):
-            placeholders = ','.join('?' for _ in bloque)
-            query = f"SELECT {columnas} FROM TRABAJADORES WHERE DNI IN ({placeholders})"
-            cursor.execute(query, bloque)
-            for row in cursor.fetchall():
-                dni = normalizar_dni(getattr(row, 'DNI', None))
-                if not dni:
-                    continue
-                alta_dt = to_date(getattr(row, 'FECHAALTA', None))
-                baja_dt = to_date(getattr(row, 'FECHABAJA', None))
-                ap1 = s_trim(getattr(row, 'APELLIDOS', None))
-                ap2 = s_trim(getattr(row, 'APELLIDOS2', None))
-                nom = s_trim(getattr(row, 'NOMBRE', None))
-                nombre_compuesto = ' '.join([t for t in (ap1, ap2, nom) if t]).strip() or 'Falta'
-                resultado[dni] = {
-                    'Nombre': nombre_compuesto,
-                    'Alta': _date_to_str_ddmmyyyy(alta_dt),
-                    'Baja': _date_to_str_ddmmyyyy(baja_dt),
-                    'Codigo': s_trim(getattr(row, 'CODIGO', None)),
-                    'AltaDate': alta_dt,
-                    'BajaDate': baja_dt,
-                    'Genero': map_genero(getattr(row, 'SEXO', None)),
-                }
-        cursor.close()
-        conn.close()
+        vistos: set[str] = set()
+        for dni_bruto in dnis:
+            dni_norm = normalizar_dni(dni_bruto)
+            if not dni_norm or dni_norm in vistos:
+                continue
+            vistos.add(dni_norm)
+            row = get_trabajador_por_dni_y_centro(dni_norm, cursor=cursor)
+            if not row:
+                continue
+            alta_dt = parse_access_date(getattr(row, 'FECHAALTA', None))
+            baja_dt = parse_access_date(getattr(row, 'FECHABAJA', None))
+            ap1 = s_trim(getattr(row, 'APELLIDOS', None))
+            ap2 = s_trim(getattr(row, 'APELLIDOS2', None))
+            nom = s_trim(getattr(row, 'NOMBRE', None))
+            nombre_compuesto = ' '.join([t for t in (ap1, ap2, nom) if t]).strip() or 'Falta'
+            resultado[dni_norm] = {
+                'Nombre': nombre_compuesto,
+                'Alta': _date_to_str_ddmmyyyy(alta_dt),
+                'Baja': _date_to_str_ddmmyyyy(baja_dt),
+                'Codigo': s_trim(getattr(row, 'CODIGO', None)),
+                'AltaDate': alta_dt,
+                'BajaDate': baja_dt,
+                'Genero': map_genero(getattr(row, 'SEXO', None)),
+            }
     except Exception as e:
         print(f"❌ Error cargando TRABAJADORES: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
     return resultado
 
 
@@ -314,7 +475,7 @@ def cargar_datos_ajustados(
     altas_por_dni: Optional[Dict[str, date]] = None,
 ) -> Dict[str, Dict[str, Union[date, int, float, str, None]]]:
     """Lectura única de DATOS_AJUSTADOS con agregados por DNI."""
-    ruta = r'X:\\ENLACES\\Power BI\\Campaña\\PercecoBi(Campaña).mdb'
+    ruta = ACCESS_DB_PATH
     datos = defaultdict(lambda: {
         'UltimoDia': None,
         '_fechas': set(),
@@ -331,12 +492,10 @@ def cargar_datos_ajustados(
             if alta_dt:
                 altas_filtradas[normalizar_dni(dni_key)] = alta_dt
 
-    conn_str = (
-        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};'
-        f'DBQ={ruta};'
-    )
+    conn = _open_access_connection()
+    if not conn:
+        return datos
     try:
-        conn = pyodbc.connect(str(conn_str))
         cursor = conn.cursor()
         for bloque in _chunk_iterable(list(dnis), 1000):
             placeholders = ','.join('?' for _ in bloque)
@@ -380,62 +539,12 @@ def cargar_datos_ajustados(
     return final
 
 
-def calcular_baja_y_totales(
-    cursor,
-    dni: str
-) -> Tuple[Optional[str], int, float, Optional[date], Optional[date]]:
-    fecha_alta: Optional[date] = None
-    fecha_baja: Optional[date] = None
-    baja_str: Optional[str] = None
-    dni_param = (dni or "").strip().upper()
-
-    if not dni_param:
-        return baja_str, 0, 0.0, fecha_alta, fecha_baja
-
-    row = cursor.execute(
-        "SELECT FECHAALTA, FECHABAJA, SEXO FROM TRABAJADORES WHERE Trim(UCase(DNI)) = ?",
-        (dni_param,)
-    ).fetchone()
-
-    raw_baja = getattr(row, 'FECHABAJA', None) if row else None
-    fecha_alta = parse_access_date(getattr(row, 'FECHAALTA', None)) if row else None
-    fecha_baja = parse_access_date(raw_baja) if row else None
-    baja_str = fmt_dmy(fecha_baja)
-    print(f"[TRAB] DNI={dni_param} FECHABAJA_raw={raw_baja!r} -> baja={baja_str}")
-
-    if fecha_baja:
-        return baja_str, 0, 0.0, fecha_alta, fecha_baja
-
-    if not fecha_alta:
-        return baja_str, 0, 0.0, fecha_alta, fecha_baja
-
-    filas = cursor.execute(
-        "SELECT FECHA, HORAS, HORASEXT FROM DATOS_AJUSTADOS WHERE Trim(UCase(DNI)) = ? AND FECHA >= ?",
-        (dni_param, fecha_alta)
-    ).fetchall()
-
-    if not filas:
-        return baja_str, 0, 0.0, fecha_alta, fecha_baja
-
-    fechas = set()
-    horas_acum = 0.0
-    for fila in filas:
-        fecha_reg = parse_access_date(getattr(fila, 'FECHA', None))
-        if fecha_reg:
-            fechas.add(fecha_reg)
-        horas_acum += _to_float_safe(getattr(fila, 'HORAS', 0))
-        horas_acum += _to_float_safe(getattr(fila, 'HORASEXT', 0))
-
-    total_dia = len(fechas)
-    total_horas = round(horas_acum, 2)
-
-    return baja_str, total_dia, total_horas, fecha_alta, fecha_baja
-
-
 def calcular_totales_y_baja(dni: str) -> Dict[str, Union[int, float, Optional[date], Optional[str]]]:
     resultado: Dict[str, Union[int, float, Optional[date], Optional[str]]] = {
         'total_dia': 0,
         'total_horas': 0.0,
+        'total_dia_mes_actual': 0,
+        'total_dia_semana_actual': 0,
         'fecha_alta': None,
         'fecha_baja': None,
         'baja_str': None,
@@ -444,33 +553,78 @@ def calcular_totales_y_baja(dni: str) -> Dict[str, Union[int, float, Optional[da
     if not dni_normalizado:
         return resultado
 
-    ruta = r'X:\ENLACES\Power BI\Campaña\PercecoBi(Campaña).mdb'
-    if not os.path.exists(ruta):
+    conn = _open_access_connection()
+    if not conn:
         return resultado
 
-    conn_str = (
-        r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};'
-        f'DBQ={ruta};'
-    )
-
-    conn = None
     cursor = None
     try:
-        conn = pyodbc.connect(str(conn_str))
         cursor = conn.cursor()
-        baja_str, total_dia, total_horas, fecha_alta, fecha_baja = calcular_baja_y_totales(cursor, dni_normalizado)
-        resultado['baja_str'] = baja_str
-        resultado['total_dia'] = int(total_dia)
-        resultado['total_horas'] = round(float(total_horas), 2)
+        row = get_trabajador_por_dni_y_centro(dni_normalizado, cursor=cursor)
+        if not row:
+            return resultado
+
+        fecha_alta = parse_access_date(getattr(row, 'FECHAALTA', None))
+        fecha_baja = parse_access_date(getattr(row, 'FECHABAJA', None))
+        baja_str = fmt_dmy(fecha_baja)
+
         resultado['fecha_alta'] = fecha_alta
         resultado['fecha_baja'] = fecha_baja
+        resultado['baja_str'] = baja_str
+
+        hoy = date.today()
+        if fecha_baja:
+            print(f"[AJUST] DNI={dni_normalizado} baja={baja_str} -> Mensaje=False")
+            return resultado
+
+        if fecha_alta and fecha_alta <= hoy:
+            total_dia = contar_dias_distintos(dni_normalizado, fecha_alta, hoy, cursor=cursor)
+            total_horas = sumar_horas(dni_normalizado, fecha_alta, hoy, cursor=cursor)
+            resultado['total_dia'] = int(total_dia)
+            resultado['total_horas'] = round(float(total_horas), 2)
+            print(
+                f"[AJUST] DNI={dni_normalizado} rango_global={fmt_dmy(fecha_alta)}→{fmt_dmy(hoy)} "
+                f"días={total_dia} horas={resultado['total_horas']:.2f}"
+            )
+        else:
+            print(f"[AJUST] DNI={dni_normalizado} sin fecha de alta válida para totales globales")
+
+        primer_dia_mes = hoy.replace(day=1)
+        primer_dia_semana = hoy - timedelta(days=hoy.weekday())
+
+        desde_mes = primer_dia_mes
+        if fecha_alta and fecha_alta > desde_mes:
+            desde_mes = fecha_alta
+        if desde_mes <= hoy:
+            total_mes = contar_dias_distintos(dni_normalizado, desde_mes, hoy, cursor=cursor)
+            resultado['total_dia_mes_actual'] = int(total_mes)
+            print(
+                f"[AJUST] DNI={dni_normalizado} rango_mes={fmt_dmy(desde_mes)}→{fmt_dmy(hoy)} "
+                f"días={total_mes}"
+            )
+
+        desde_semana = primer_dia_semana
+        if fecha_alta and fecha_alta > desde_semana:
+            desde_semana = fecha_alta
+        if desde_semana <= hoy:
+            total_semana = contar_dias_distintos(dni_normalizado, desde_semana, hoy, cursor=cursor)
+            resultado['total_dia_semana_actual'] = int(total_semana)
+            print(
+                f"[AJUST] DNI={dni_normalizado} rango_semana={fmt_dmy(desde_semana)}→{fmt_dmy(hoy)} "
+                f"días={total_semana}"
+            )
     except Exception as e:
         print(f"⚠️ Error calculando totales para {dni_normalizado}: {e}")
     finally:
         if cursor:
-            cursor.close()
-        if conn:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        try:
             conn.close()
+        except Exception:
+            pass
     return resultado
 
 
@@ -498,10 +652,7 @@ def migrar_cultivo_a_genero(db, cursor) -> None:
         dni_param = (dni_raw or "").strip().upper()
         if cursor and dni_param:
             try:
-                row = cursor.execute(
-                    "SELECT FECHAALTA, FECHABAJA, SEXO FROM TRABAJADORES WHERE Trim(UCase(DNI)) = ?",
-                    (dni_param,)
-                ).fetchone()
+                row = get_trabajador_por_dni_y_centro(dni_param, cursor=cursor)
                 sexo = getattr(row, "SEXO", None) if row else None
                 genero_valor = map_genero(sexo)
             except Exception as exc:
@@ -545,14 +696,16 @@ def abrir_gestion_usuarios(db):
     ventana.geometry("1400x600")
 
     columnas = ["Dni", "Nombre", "Telefono", "correo", "Puesto", "Turno", "Genero",
-                "Mensaje", "Seleccionable", "Valor", "Alta", "UltimoDia", "TotalDia", "TotalHoras", "Baja", "Codigo"]
+                "Mensaje", "Seleccionable", "Valor", "Alta", "UltimoDia", "TotalDia", "TotalHoras",
+                "TotalDiaMesActual", "TotalDiaSemanaActual", "Baja", "Codigo"]
 
     encabezados = {
         "Dni": "Dni", "Nombre": "Nombre", "Telefono": "Teléfono", "correo": "Correo",
         "Puesto": "Puesto", "Turno": "Turno", "Genero": "Género",
         "Mensaje": "Mensaje", "Seleccionable": "Seleccionable", "Valor": "Valor",
         "Alta": "Alta", "UltimoDia": "Último Día", "TotalDia": "Total Día",
-        "TotalHoras": "Total Horas", "Baja": "Baja", "Codigo": "Código"
+        "TotalHoras": "Total Horas", "TotalDiaMesActual": "Total Día Mes Actual",
+        "TotalDiaSemanaActual": "Total Día Semana Actual", "Baja": "Baja", "Codigo": "Código"
     }
 
     datos_originales = []
@@ -824,7 +977,7 @@ def abrir_gestion_usuarios(db):
             doc_ref = db.collection("UsuariosAutorizados").document(uid)
             if campo in ["Mensaje", "Seleccionable", "Valor"]:
                 valor = valor == "True"
-            elif campo in ["TotalDia"]:
+            elif campo in ["TotalDia", "TotalDiaMesActual", "TotalDiaSemanaActual"]:
                 valor = int(valor)
             elif campo in ["TotalHoras"]:
                 valor = float(valor)
@@ -959,6 +1112,12 @@ def abrir_gestion_usuarios(db):
 
                 total_dia_actual = _to_int_safe(data.get("TotalDia"))
                 total_horas_actual = float(round(_to_float_safe(data.get("TotalHoras")), 2))
+                raw_total_dia_mes_actual = data.get("TotalDiaMesActual")
+                raw_total_dia_semana_actual = data.get("TotalDiaSemanaActual")
+                raw_total_dia_mes_actual_str = s_trim(raw_total_dia_mes_actual)
+                raw_total_dia_semana_actual_str = s_trim(raw_total_dia_semana_actual)
+                total_dia_mes_actual_actual = _to_int_safe(raw_total_dia_mes_actual)
+                total_dia_semana_actual_actual = _to_int_safe(raw_total_dia_semana_actual)
                 baja_actual_norm = _normalize_optional_str(data.get("Baja"))
 
                 if dni_normalizado:
@@ -987,6 +1146,8 @@ def abrir_gestion_usuarios(db):
                 baja_str = totales_info.get("baja_str")
                 total_dia_calculado = _to_int_safe(totales_info.get("total_dia"))
                 total_horas_calculado = float(round(_to_float_safe(totales_info.get("total_horas")), 2))
+                total_dia_mes_actual_calc = _to_int_safe(totales_info.get("total_dia_mes_actual"))
+                total_dia_semana_actual_calc = _to_int_safe(totales_info.get("total_dia_semana_actual"))
                 fecha_alta_calc = totales_info.get("fecha_alta")
 
                 if fecha_alta_calc and not s_trim(data.get("Alta")):
@@ -999,6 +1160,8 @@ def abrir_gestion_usuarios(db):
                     "Baja": baja_str,
                     "TotalDia": int(total_dia_calculado),
                     "TotalHoras": float(round(total_horas_calculado, 2)),
+                    "TotalDiaMesActual": int(total_dia_mes_actual_calc),
+                    "TotalDiaSemanaActual": int(total_dia_semana_actual_calc),
                 }
 
                 baja_nueva_norm = _normalize_optional_str(updates["Baja"])
@@ -1013,6 +1176,22 @@ def abrir_gestion_usuarios(db):
                 if updates["TotalHoras"] != total_horas_actual:
                     actualiza["TotalHoras"] = updates["TotalHoras"]
                 data["TotalHoras"] = updates["TotalHoras"]
+
+                if (
+                    updates["TotalDiaMesActual"] != total_dia_mes_actual_actual
+                    or raw_total_dia_mes_actual is None
+                    or raw_total_dia_mes_actual_str == ""
+                ):
+                    actualiza["TotalDiaMesActual"] = updates["TotalDiaMesActual"]
+                data["TotalDiaMesActual"] = updates["TotalDiaMesActual"]
+
+                if (
+                    updates["TotalDiaSemanaActual"] != total_dia_semana_actual_actual
+                    or raw_total_dia_semana_actual is None
+                    or raw_total_dia_semana_actual_str == ""
+                ):
+                    actualiza["TotalDiaSemanaActual"] = updates["TotalDiaSemanaActual"]
+                data["TotalDiaSemanaActual"] = updates["TotalDiaSemanaActual"]
 
                 ajust = ajust_by_dni.get(dni_normalizado, {})
                 if ajust:
@@ -1050,6 +1229,8 @@ def abrir_gestion_usuarios(db):
                 data["UltimoDia"] = data.get("UltimoDia") or _date_to_str_ddmmyyyy(hoy)
                 data["TotalDia"] = str(total_dia_calculado)
                 data["TotalHoras"] = f"{total_horas_calculado:.2f}"
+                data["TotalDiaMesActual"] = str(total_dia_mes_actual_calc)
+                data["TotalDiaSemanaActual"] = str(total_dia_semana_actual_calc)
                 data["Baja"] = data.get("Baja") or ""
                 data["Codigo"] = s_trim(data.get("Codigo")) or ""
 
@@ -1160,7 +1341,7 @@ def abrir_gestion_usuarios(db):
             for campo in ["Mensaje", "Seleccionable", "Valor"]:
                 datos[campo] = datos[campo] == "True"
 
-            for campo in ["TotalDia"]:
+            for campo in ["TotalDia", "TotalDiaMesActual", "TotalDiaSemanaActual"]:
                 try:
                     datos[campo] = int(datos[campo])
                 except:
