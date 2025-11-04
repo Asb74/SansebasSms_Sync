@@ -325,9 +325,8 @@ def abrir_generar_mensajes(db, preset=None):
         try:
             count = 0
             ahora_utc = datetime.now(timezone.utc)
-            local_now = ahora_utc.astimezone()
-            dia_str = local_now.strftime("%Y-%m-%d")
-            hora_str = local_now.strftime("%H:%M")
+            dia_str = dia.strftime("%Y-%m-%d")
+            hora_str = f"{h:02d}:{m:02d}"
 
             for uid, data_u in usuarios_filtrados:
                 telefono = data_u.get("Telefono") or data_u.get("telefono") or ""
