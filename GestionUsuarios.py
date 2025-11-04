@@ -766,7 +766,7 @@ def abrir_gestion_usuarios(db):
                 "uid": uid,
                 "Fecha": _to_timestamp_inicio_dia(dia),
                 "Motivo": motivo,
-                "Admitido": "Pendiente",
+                "Admitido": "Ok",
                 "creadoEn": dt.datetime.now(tz=tz),
             }
             try:
