@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import webbrowser
-from datetime import date, datetime, time as time_cls, timedelta, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -36,7 +36,6 @@ else:  # pragma: no cover - pyodbc ausente
 
 from firebase_admin import firestore
 from google.api_core.exceptions import FailedPrecondition
-from google.cloud.firestore_v1.base_query import FieldFilter
 
 from thread_utils import run_bg
 
@@ -61,7 +60,7 @@ _conn_fich_path: Optional[str] = None
 
 _COLUMNAS_LLAMADOS: Sequence[str] = (
     "Fecha",
-    "Hora Envío",
+    "Hora",
     "Mensaje",
     "Estado Mensaje",
     "Nombre",
@@ -90,6 +89,8 @@ _btn_generar: Optional[ttk.Button] = None
 _btn_probar_indice: Optional[ttk.Button] = None
 _tree_llamados: Optional[ttk.Treeview] = None
 _tree_sin_mensaje: Optional[ttk.Treeview] = None
+_total_llamados_var: Optional[tk.StringVar] = None
+_total_sin_msg_var: Optional[tk.StringVar] = None
 
 _datos_llamados: List[Dict[str, Any]] = []
 _datos_sin_mensaje: List[Dict[str, Any]] = []
@@ -255,6 +256,7 @@ def abrir_informe_asistencia(
         global _ventana, _date_widget, _date_var, _tipo_var, _tipo_combo
         global _tree_llamados, _tree_sin_mensaje, _btn_generar, _btn_probar_indice
         global _datos_llamados, _datos_sin_mensaje, _fecha_actual
+        global _total_llamados_var, _total_sin_msg_var
 
         if _ventana is not None:
             try:
@@ -273,6 +275,8 @@ def abrir_informe_asistencia(
         _datos_llamados = []
         _datos_sin_mensaje = []
         _fecha_actual = None
+        _total_llamados_var = None
+        _total_sin_msg_var = None
         _cerrar_conexion_fichajes()
 
     _ventana.protocol("WM_DELETE_WINDOW", _al_cerrar)
@@ -282,6 +286,7 @@ def _construir_ui(root: tk.Toplevel) -> None:
     global _date_widget, _date_var, _tipo_var, _tipo_combo, _btn_generar
     global _btn_probar_indice
     global _tree_llamados, _tree_sin_mensaje
+    global _total_llamados_var, _total_sin_msg_var
 
     root.grid_rowconfigure(1, weight=1)
     root.grid_columnconfigure(0, weight=1)
@@ -348,8 +353,14 @@ def _construir_ui(root: tk.Toplevel) -> None:
     _tree_llamados.tag_configure("asiste_si", background="#e3f8e6")
     _tree_llamados.tag_configure("asiste_no", background="#fde4e4")
 
+    global _total_llamados_var
+    _total_llamados_var = tk.StringVar(value="Total personas llamadas: 0")
+    ttk.Label(frame_a, textvariable=_total_llamados_var).grid(
+        row=1, column=0, sticky="w", padx=0, pady=(6, 0)
+    )
+
     botones_a = ttk.Frame(frame_a)
-    botones_a.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    botones_a.grid(row=2, column=0, sticky="ew", pady=(8, 0))
     botones_a.columnconfigure(0, weight=1)
     botones_a.columnconfigure(1, weight=1)
 
@@ -372,8 +383,14 @@ def _construir_ui(root: tk.Toplevel) -> None:
 
     _tree_sin_mensaje = _crear_treeview(cont_b, _COLUMNAS_SIN_MENSAJE)
 
+    global _total_sin_msg_var
+    _total_sin_msg_var = tk.StringVar(value="Total asistieron sin mensaje: 0")
+    ttk.Label(frame_b, textvariable=_total_sin_msg_var).grid(
+        row=1, column=0, sticky="w", padx=0, pady=(6, 0)
+    )
+
     botones_b = ttk.Frame(frame_b)
-    botones_b.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    botones_b.grid(row=2, column=0, sticky="ew", pady=(8, 0))
     botones_b.columnconfigure(0, weight=1)
     botones_b.columnconfigure(1, weight=1)
 
@@ -412,7 +429,7 @@ def _crear_treeview(parent: tk.Misc, columnas: Sequence[str]) -> ttk.Treeview:
 def _ancho_sugerido(columna: str) -> int:
     sugeridos = {
         "Fecha": 100,
-        "Hora Envío": 100,
+        "Hora": 100,
         "Mensaje": 200,
         "Estado Mensaje": 140,
         "Nombre": 200,
@@ -610,12 +627,8 @@ def _probar_indice() -> None:
 
     def _worker() -> None:
         try:
-            tz_local = datetime.now().astimezone().tzinfo or timezone.utc
-            day_start = datetime.combine(fecha, time_cls.min).replace(tzinfo=tz_local)
-            day_end = day_start + timedelta(days=1)
-
             _log_firestore_context(_db)
-            mensajes = get_mensajes(_db, day_start, day_end, tipo)
+            mensajes = get_mensajes(_db, fecha, tipo)
 
             def _ok() -> None:
                 if _btn_probar_indice is not None:
@@ -683,14 +696,11 @@ def _generar_bg(fecha: date, tipo: str) -> None:
         if conn is None:
             raise RuntimeError("No se pudo acceder a la base de datos de fichajes.")
 
-        tz_local = datetime.now().astimezone().tzinfo or timezone.utc
-        day_start = datetime.combine(fecha, time_cls.min).replace(tzinfo=tz_local)
-        day_end = day_start + timedelta(days=1)
         fecha_texto = fecha.strftime("%d-%m-%Y")
         fecha_yyyymmdd = fecha.strftime("%Y%m%d")
 
         _log_firestore_context(_db)
-        mensajes = get_mensajes(_db, day_start, day_end, tipo)
+        mensajes = get_mensajes(_db, fecha, tipo)
         usuarios_map = get_usuarios_map(_db)
         usuarios_por_codigo = get_usuarios_por_codigo(usuarios_map)
 
@@ -702,31 +712,26 @@ def _generar_bg(fecha: date, tipo: str) -> None:
             raise
 
         filas_llamados: List[Dict[str, Any]] = []
-        codigos_con_mensaje: set[str] = set()
 
         for mensaje in mensajes:
             uid = _limpiar_str(mensaje.get("uid"))
             usuario = usuarios_map.get(uid) if uid else None
-            codigo = _limpiar_str((usuario or {}).get("Codigo"))
+            codigo_usuario = _limpiar_str((usuario or {}).get("Codigo"))
+            codigo_doc = _limpiar_str(mensaje.get("codigo"))
+            codigo_valido = codigo_usuario or codigo_doc
+            if codigo_valido and codigo_valido.upper() == "N/D":
+                codigo_valido = None
+            codigo_mostrar = codigo_valido or "N/D"
+
             nombre = _limpiar_str((usuario or {}).get("Nombre")) or "N/D"
             turno = _limpiar_str((usuario or {}).get("Turno")) or "N/D"
 
-            if not codigo:
-                codigo = _limpiar_str(mensaje.get("codigo")) or "N/D"
-
-            hora_envio = ""
-            fecha_hora = mensaje.get("fechaHora")
-            if isinstance(fecha_hora, datetime):
-                if fecha_hora.tzinfo is None:
-                    fecha_hora = fecha_hora.replace(tzinfo=tz_local)
-                hora_envio = fecha_hora.astimezone(tz_local).strftime("%H:%M")
+            fecha_mensaje = _limpiar_str(mensaje.get("dia")) or "N/D"
+            hora_mensaje = _limpiar_str(mensaje.get("hora")) or "N/D"
 
             mensaje_tipo = _limpiar_str(mensaje.get("mensaje")) or tipo
             estado = _limpiar_str(mensaje.get("estado")) or "N/D"
 
-            codigo_valido = codigo if codigo != "N/D" else None
-            if codigo_valido:
-                codigos_con_mensaje.add(codigo_valido)
             presente = False
             if codigo_valido:
                 try:
@@ -738,20 +743,34 @@ def _generar_bg(fecha: date, tipo: str) -> None:
             asiste_texto = "SI" if presente else "NO"
 
             fila = {
-                "Fecha": fecha_texto,
-                "Hora Envío": hora_envio,
+                "Fecha": fecha_mensaje,
+                "Hora": hora_mensaje,
                 "Mensaje": mensaje_tipo,
                 "Estado Mensaje": estado,
                 "Nombre": nombre,
                 "Turno": turno,
-                "Codigo": codigo if codigo != "N/D" else "N/D",
+                "Codigo": codigo_mostrar,
                 "Asiste": asiste_texto,
             }
             filas_llamados.append(fila)
 
-        sin_mensaje = sorted({codigo for codigo in presentes} - codigos_con_mensaje)
+        codigos_con_mensaje = {
+            codigo
+            for codigo in (
+                str(fila.get("Codigo") or "").strip() for fila in filas_llamados
+            )
+            if codigo and codigo.upper() != "N/D"
+        }
+
+        presentes_codigos = {
+            idempleado_a_codigo(str(idemp)) for idemp in presentes
+        }
+        sin_mensaje_codigos = {
+            codigo for codigo in presentes_codigos if codigo and codigo not in codigos_con_mensaje
+        }
+
         filas_sin_mensaje: List[Dict[str, Any]] = []
-        for codigo in sin_mensaje:
+        for codigo in sorted(sin_mensaje_codigos):
             usuario = usuarios_por_codigo.get(codigo)
             nombre = _limpiar_str((usuario or {}).get("Nombre")) or "N/D"
             turno = _limpiar_str((usuario or {}).get("Turno")) or "N/D"
@@ -798,11 +817,19 @@ def _actualizar_treeviews() -> None:
         for fila in _datos_llamados:
             tags = ("asiste_si",) if fila.get("Asiste") == "SI" else ("asiste_no",)
             _tree_llamados.insert("", "end", values=[fila.get(c, "") for c in _COLUMNAS_LLAMADOS], tags=tags)
+        if _total_llamados_var is not None:
+            _total_llamados_var.set(
+                f"Total personas llamadas: {len(_datos_llamados)}"
+            )
 
     if _tree_sin_mensaje is not None:
         _tree_sin_mensaje.delete(*_tree_sin_mensaje.get_children(""))
         for fila in _datos_sin_mensaje:
             _tree_sin_mensaje.insert("", "end", values=[fila.get(c, "") for c in _COLUMNAS_SIN_MENSAJE])
+        if _total_sin_msg_var is not None:
+            _total_sin_msg_var.set(
+                f"Total asistieron sin mensaje: {len(_datos_sin_mensaje)}"
+            )
 
 
 def cargar_tipos_produccion(db: firestore.Client) -> List[str]:
@@ -857,18 +884,16 @@ def cargar_tipos_produccion(db: firestore.Client) -> List[str]:
 
 def get_mensajes(
     db: firestore.Client,
-    inicio: datetime,
-    fin: datetime,
+    fecha_sel: date,
     tipo: str,
 ) -> List[Dict[str, Any]]:
     if db is None:
         return []
 
     coleccion = db.collection("Mensajes")
+    dia_str = fecha_sel.strftime("%Y-%m-%d")
     consulta = (
-        coleccion.where(filter=FieldFilter("fechaHora", ">=", inicio))
-        .where(filter=FieldFilter("fechaHora", "<", fin))
-        .where(filter=FieldFilter("mensaje", "==", tipo))
+        coleccion.where("mensaje", "==", tipo).where("dia", "==", dia_str)
     )
     try:
         documentos = list(consulta.stream())
@@ -940,6 +965,16 @@ def get_codigos_presentes(fecha: str, conn: Optional[Any]) -> set[str]:
             if codigo:
                 presentes.add(codigo)
     return presentes
+
+
+def idempleado_a_codigo(idemp: str) -> str:
+    idemp = (idemp or "").strip()
+    if not idemp:
+        return ""
+    try:
+        return str(int(idemp))
+    except Exception:
+        return idemp
 
 
 def asiste(codigo: str, fecha: str, conn: Optional[Any]) -> bool:
