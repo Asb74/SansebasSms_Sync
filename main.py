@@ -23,8 +23,8 @@ from google.oauth2 import service_account
 from GestionUsuarios import abrir_gestion_usuarios
 from GestionMensajes import abrir_gestion_mensajes
 from GenerarMensajes import abrir_generar_mensajes
-from notificaciones_push import NOTI_DB, enviar_push_por_mensaje
-from utils_mensajes import build_mensaje_id
+from notificaciones_push import NOTI_DB
+from utils_mensajes import build_mensaje_id, reenviar_mensaje
 import re
 from decimal import Decimal
 from typing import List, Optional, Tuple
@@ -340,6 +340,7 @@ def abrir_estado_notificaciones():
         "tipo",
         "mensaje",
         "estado",
+        "push_estado",
         "mensaje_id",
     )
     pendiente_headers = (
@@ -351,6 +352,7 @@ def abrir_estado_notificaciones():
         "Tipo",
         "Mensaje",
         "Estado",
+        "pushEstado",
         "MensajeID",
     )
     tree_pend = ttk.Treeview(
@@ -372,7 +374,7 @@ def abrir_estado_notificaciones():
         tree_pend.heading(col, text=header)
         if col == "mensaje":
             tree_pend.column(col, width=280, stretch=True)
-        elif col in {"fecha", "hora", "estado"}:
+        elif col in {"fecha", "hora", "estado", "push_estado"}:
             tree_pend.column(col, width=100, stretch=False)
         elif col == "telefono":
             tree_pend.column(col, width=120, stretch=False)
@@ -417,7 +419,7 @@ def abrir_estado_notificaciones():
         tree_inc.heading(col, text=header)
         if col == "mensaje":
             tree_inc.column(col, width=280, stretch=True)
-        elif col in {"fecha", "hora", "estado"}:
+        elif col in {"fecha", "hora", "estado", "push_estado"}:
             tree_inc.column(col, width=100, stretch=False)
         elif col == "telefono":
             tree_inc.column(col, width=120, stretch=False)
@@ -534,6 +536,7 @@ def abrir_estado_notificaciones():
         tipo = _safe_str(doc_data.get("tipo"))
         mensaje = _safe_str(doc_data.get("mensaje") or doc_data.get("cuerpo"))
         estado = _safe_str(doc_data.get("estado"))
+        push_estado = _safe_str(doc_data.get("pushEstado"))
         base = (
             fecha,
             hora,
@@ -543,6 +546,7 @@ def abrir_estado_notificaciones():
             tipo,
             mensaje,
             estado,
+            push_estado,
             doc_id,
         )
         if not include_push:
@@ -608,7 +612,7 @@ def abrir_estado_notificaciones():
                 vistos.add(doc.id)
 
         query_inc = db.collection("Mensajes").where(
-            filter=FieldFilter("estado", "in", ["ErrorPush", "Parcial", "SinToken"])
+            filter=FieldFilter("pushEstado", "in", ["ErrorPush", "Parcial", "SinToken"])
         )
         if fecha_desde_utc is not None:
             query_inc = query_inc.where(filter=FieldFilter("fechaHora", ">=", fecha_desde_utc))
@@ -656,6 +660,8 @@ def abrir_estado_notificaciones():
 
             pend_rows: list[dict] = []
             for doc_id, data in pendientes:
+                if _safe_str(data.get("pushEstado")):
+                    continue
                 usuario = _usuario(_safe_str(data.get("uid")))
                 valores = _datos_para_tabla(doc_id, data, usuario, include_push=False)
                 pend_rows.append({"doc_id": doc_id, "doc": data, "usuario": usuario, "values": valores})
@@ -709,25 +715,14 @@ def abrir_estado_notificaciones():
 
             for doc_id in seleccion:
                 try:
-                    snap = with_retry(lambda: db.collection("Mensajes").document(doc_id).get())
-                except Exception as exc:
-                    logger.exception("No se pudo obtener el mensaje %s", doc_id)
+                    resultado = reenviar_mensaje(db, doc_id, force=True)
+                except ValueError as exc:
                     errores_locales.append(f"{doc_id}: {exc}")
                     continue
-                if not getattr(snap, "exists", False):
-                    errores_locales.append(f"{doc_id}: documento inexistente")
+                except Exception as exc:
+                    logger.exception("No se pudo reenviar el mensaje %s", doc_id)
+                    errores_locales.append(f"{doc_id}: {exc}")
                     continue
-                datos = snap.to_dict() or {}
-                uid = _safe_str(datos.get("uid"))
-                usuario = get_doc_safe(db.collection("UsuariosAutorizados").document(uid)) if uid else {}
-                resultado = enviar_push_por_mensaje(
-                    db,
-                    doc_id,
-                    datos,
-                    usuario or {},
-                    actualizar_estado=True,
-                    force=True,
-                )
                 env = int(resultado.get("enviados", 0))
                 fall = int(resultado.get("fallidos", 0))
                 if env == 0 and fall == 0:

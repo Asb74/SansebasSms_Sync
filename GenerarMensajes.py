@@ -343,6 +343,10 @@ def abrir_generar_mensajes(db, preset=None):
                     "dia": dia_str,
                     "hora": hora_str,
                     "fechaHora": ahora_utc,
+                    "pushEstado": None,
+                    "pushEnviados": 0,
+                    "pushFallidos": 0,
+                    "pushError": None,
                 }
                 doc_ref = db.collection("Mensajes").document(doc_id)
                 doc_ref.set(payload)
