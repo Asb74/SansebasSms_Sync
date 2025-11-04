@@ -51,18 +51,51 @@ def _tokens_from_user(user_doc: dict) -> list[str]:
     return []
 
 
+def _quitar_tokens_invalidos(
+    db: firestore.Client,
+    mensaje_data: dict,
+    usuario: dict,
+    tokens_a_remover: list[str],
+) -> None:
+    if not tokens_a_remover:
+        return
+
+    uid = mensaje_data.get("uid") or usuario.get("UID") or usuario.get("uid")
+    if not uid:
+        return
+
+    ref = db.collection("UsuariosAutorizados").document(str(uid))
+    actual = usuario.get("fcmToken")
+    try:
+        if isinstance(actual, list):
+            nuevos = [t for t in actual if t not in tokens_a_remover]
+            ref.update({"fcmToken": nuevos})
+            usuario["fcmToken"] = nuevos
+        elif isinstance(actual, str):
+            if actual in tokens_a_remover:
+                ref.update({"fcmToken": firestore.DELETE_FIELD})
+                usuario.pop("fcmToken", None)
+        else:
+            ref.update({"fcmToken": firestore.DELETE_FIELD})
+            usuario.pop("fcmToken", None)
+    except Exception:
+        logging.exception("No se pudo actualizar tokens inválidos para %s", uid)
+
+
 def enviar_push_por_mensaje(
     db: firestore.Client,
     mensaje_id: str,  # id del doc en Mensajes
     mensaje_data: dict,  # contenido del doc recién guardado
     usuario: dict,  # doc de UsuariosAutorizados del destinatario (por uid)
     actualizar_estado: bool = True,
+    *,
+    force: bool = False,
 ) -> dict:
     """Devuelve dict con {enviados:int, fallidos:int}. No lanza si ya fue enviado (dedupe)."""
 
     enviados = fallidos = 0
     dedupe = _load_notificados()
-    if mensaje_id in dedupe:
+    if not force and mensaje_id in dedupe:
         logging.info("Notificación ya enviada para %s (dedupe)", mensaje_id)
         return {"enviados": 0, "fallidos": 0}
 
@@ -74,6 +107,8 @@ def enviar_push_por_mensaje(
                 "estado": "SinToken",
                 "pushError": "Usuario sin fcmToken",
                 "pushEnviadoEn": firestore.SERVER_TIMESTAMP,
+                "pushFallidos": 1,
+                "pushEnviados": 0,
             })
         return {"enviados": 0, "fallidos": 1}
 
@@ -100,18 +135,44 @@ def enviar_push_por_mensaje(
 
     try:
         resp = messaging.send_each(batch, dry_run=False)
-        enviados = sum(1 for r in resp.responses if r.success)
-        fallidos = sum(1 for r in resp.responses if not r.success)
+        errores: list[str] = []
+        tokens_a_remover: list[str] = []
+        for token, resultado in zip(tokens, resp.responses):
+            if resultado.success:
+                enviados += 1
+                continue
+            fallidos += 1
+            exc = resultado.exception
+            mensaje_error = getattr(exc, "message", None) or str(exc)
+            if mensaje_error:
+                errores.append(mensaje_error)
+            if isinstance(exc, messaging.UnregisteredError):
+                tokens_a_remover.append(token)
+
+        estado_final = "OK"
+        if fallidos:
+            estado_final = "Parcial" if enviados > 0 else "ErrorPush"
+
         if actualizar_estado:
-            db.collection("Mensajes").document(mensaje_id).update({
-                "estado": "OK" if fallidos == 0 and enviados > 0 else "Parcial",
+            update_payload = {
+                "estado": estado_final,
                 "pushEnviadoEn": firestore.SERVER_TIMESTAMP,
                 "pushFallidos": fallidos,
                 "pushEnviados": enviados,
-            })
+            }
+            if errores:
+                update_payload["pushError"] = "; ".join(dict.fromkeys(errores))
+            else:
+                update_payload["pushError"] = firestore.DELETE_FIELD
+            db.collection("Mensajes").document(mensaje_id).update(update_payload)
+
+        if tokens_a_remover:
+            _quitar_tokens_invalidos(db, mensaje_data, usuario, tokens_a_remover)
+
         if enviados > 0:
             dedupe.add(mensaje_id)
             _save_notificados(dedupe)
+
         return {"enviados": enviados, "fallidos": fallidos}
     except Exception as e:
         logging.exception("Error enviando push")
@@ -120,5 +181,7 @@ def enviar_push_por_mensaje(
                 "estado": "ErrorPush",
                 "pushError": str(e),
                 "pushEnviadoEn": firestore.SERVER_TIMESTAMP,
+                "pushFallidos": len(tokens),
+                "pushEnviados": 0,
             })
         return {"enviados": 0, "fallidos": len(tokens)}

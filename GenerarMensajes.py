@@ -11,6 +11,7 @@ except Exception:  # pragma: no cover - tkcalendar opcional
 
 from GestionUsuarios import on_mensajes_generados
 from notificaciones_push import enviar_push_por_mensaje
+from utils_mensajes import build_mensaje_id
 
 
 logger = logging.getLogger(__name__)
@@ -276,10 +277,6 @@ def abrir_generar_mensajes(db, preset=None):
             messagebox.showerror("Error", "Hora inválida")
             return
 
-        fechaHora = datetime(dia.year, dia.month, dia.day, h, m, 0)
-        dia_str = dia.strftime("%Y-%m-%d")
-        hora_str = f"{h:02d}:{m:02d}"
-
         btn_guardar.config(state="disabled")
         ventana_generar.update_idletasks()
         uids_afectados: list[str] = []
@@ -327,9 +324,14 @@ def abrir_generar_mensajes(db, preset=None):
 
         try:
             count = 0
+            ahora_utc = datetime.now(timezone.utc)
+            local_now = ahora_utc.astimezone()
+            dia_str = local_now.strftime("%Y-%m-%d")
+            hora_str = local_now.strftime("%H:%M")
+
             for uid, data_u in usuarios_filtrados:
                 telefono = data_u.get("Telefono") or data_u.get("telefono") or ""
-                doc_id = f"{uid}_{fechaHora.strftime('%Y%m%d%H%M')}"
+                doc_id = build_mensaje_id(uid, ahora_utc)
                 payload = {
                     "uid": uid,
                     "telefono": telefono,
@@ -340,10 +342,10 @@ def abrir_generar_mensajes(db, preset=None):
                     "cuerpo": cuerpo,
                     "dia": dia_str,
                     "hora": hora_str,
-                    "fechaHora": fechaHora,
+                    "fechaHora": ahora_utc,
                 }
                 doc_ref = db.collection("Mensajes").document(doc_id)
-                doc_ref.set(payload, merge=True)
+                doc_ref.set(payload)
 
                 try:
                     user_snap = db.collection("UsuariosAutorizados").document(uid).get()

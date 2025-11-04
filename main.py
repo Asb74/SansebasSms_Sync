@@ -1,3 +1,4 @@
+import csv
 import tkinter as tk
 from tkinter import filedialog, simpledialog, ttk, messagebox
 import logging
@@ -23,14 +24,16 @@ from GestionUsuarios import abrir_gestion_usuarios
 from GestionMensajes import abrir_gestion_mensajes
 from GenerarMensajes import abrir_generar_mensajes
 from notificaciones_push import NOTI_DB, enviar_push_por_mensaje
+from utils_mensajes import build_mensaje_id
 import re
 from decimal import Decimal
 from typing import List, Optional, Tuple
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 try:
-    import tkcalendar  # noqa: F401
+    from tkcalendar import DateEntry
 except Exception:
+    DateEntry = None  # type: ignore
     logger.warning(
         "Instale tkcalendar para habilitar selectores de fecha: pip install tkcalendar"
     )
@@ -299,69 +302,478 @@ def obtener_token_oauth():
         logger.exception("No se pudo obtener el token de acceso")
         raise RuntimeError(f"No se pudo obtener el token de acceso: {exc}") from exc
 
-def enviar_notificaciones_push():
+def abrir_estado_notificaciones():
     root = _get_root()
+    if root is None:
+        return
 
-    def worker():
+    top = tk.Toplevel(root)
+    top.title("📊 Estado notificaciones")
+    top.geometry("1200x720")
+    top.transient(root)
+
+    filtro_frame = ttk.Frame(top, padding=(10, 10, 10, 0))
+    filtro_frame.pack(fill="x")
+
+    ttk.Label(filtro_frame, text="Fecha desde (opcional):").grid(row=0, column=0, sticky="w")
+
+    if DateEntry:
+        fecha_desde_widget = DateEntry(filtro_frame, date_pattern="yyyy-mm-dd")
+        fecha_desde_widget.grid(row=0, column=1, padx=6, pady=2, sticky="w")
+    else:
+        fecha_desde_var = tk.StringVar()
+        fecha_desde_widget = ttk.Entry(filtro_frame, textvariable=fecha_desde_var, width=12)
+        fecha_desde_widget.grid(row=0, column=1, padx=6, pady=2, sticky="w")
+
+    btn_refrescar = ttk.Button(filtro_frame, text="Refrescar")
+    btn_refrescar.grid(row=0, column=2, padx=(12, 0), pady=2)
+
+    pendiente_frame = ttk.LabelFrame(top, text="Pendientes de enviar", padding=10)
+    pendiente_frame.pack(fill="both", expand=True, padx=10, pady=(10, 5))
+
+    pendiente_columns = (
+        "fecha",
+        "hora",
+        "uid",
+        "nombre",
+        "telefono",
+        "tipo",
+        "mensaje",
+        "estado",
+        "mensaje_id",
+    )
+    pendiente_headers = (
+        "Fecha",
+        "Hora",
+        "UID",
+        "Nombre",
+        "Teléfono",
+        "Tipo",
+        "Mensaje",
+        "Estado",
+        "MensajeID",
+    )
+    tree_pend = ttk.Treeview(
+        pendiente_frame,
+        columns=pendiente_columns,
+        show="headings",
+        selectmode="extended",
+    )
+    vsb_pend = ttk.Scrollbar(pendiente_frame, orient="vertical", command=tree_pend.yview)
+    hsb_pend = ttk.Scrollbar(pendiente_frame, orient="horizontal", command=tree_pend.xview)
+    tree_pend.configure(yscrollcommand=vsb_pend.set, xscrollcommand=hsb_pend.set)
+    tree_pend.grid(row=0, column=0, sticky="nsew")
+    vsb_pend.grid(row=0, column=1, sticky="ns")
+    hsb_pend.grid(row=1, column=0, sticky="ew")
+    pendiente_frame.columnconfigure(0, weight=1)
+    pendiente_frame.rowconfigure(0, weight=1)
+
+    for col, header in zip(pendiente_columns, pendiente_headers):
+        tree_pend.heading(col, text=header)
+        if col == "mensaje":
+            tree_pend.column(col, width=280, stretch=True)
+        elif col in {"fecha", "hora", "estado"}:
+            tree_pend.column(col, width=100, stretch=False)
+        elif col == "telefono":
+            tree_pend.column(col, width=120, stretch=False)
+        elif col == "mensaje_id":
+            tree_pend.column(col, width=260, stretch=True)
+        else:
+            tree_pend.column(col, width=140, stretch=False)
+
+    pend_footer = ttk.Frame(pendiente_frame)
+    pend_footer.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+    pend_footer.columnconfigure(0, weight=1)
+
+    pend_total_var = tk.StringVar(value="Total: 0")
+    ttk.Label(pend_footer, textvariable=pend_total_var).grid(row=0, column=0, sticky="w")
+
+    btn_export_pend = ttk.Button(pend_footer, text="Exportar CSV")
+    btn_export_pend.grid(row=0, column=1, padx=4)
+    btn_reintentar_pend = ttk.Button(pend_footer, text="Reintentar seleccionados")
+    btn_reintentar_pend.grid(row=0, column=2, padx=4)
+
+    incid_frame = ttk.LabelFrame(top, text="Con incidencias", padding=10)
+    incid_frame.pack(fill="both", expand=True, padx=10, pady=(5, 10))
+
+    incid_columns = pendiente_columns + ("push_error", "push_enviados", "push_fallidos")
+    incid_headers = pendiente_headers + ("pushError", "pushEnviados", "pushFallidos")
+    tree_inc = ttk.Treeview(
+        incid_frame,
+        columns=incid_columns,
+        show="headings",
+        selectmode="extended",
+    )
+    vsb_inc = ttk.Scrollbar(incid_frame, orient="vertical", command=tree_inc.yview)
+    hsb_inc = ttk.Scrollbar(incid_frame, orient="horizontal", command=tree_inc.xview)
+    tree_inc.configure(yscrollcommand=vsb_inc.set, xscrollcommand=hsb_inc.set)
+    tree_inc.grid(row=0, column=0, sticky="nsew")
+    vsb_inc.grid(row=0, column=1, sticky="ns")
+    hsb_inc.grid(row=1, column=0, sticky="ew")
+    incid_frame.columnconfigure(0, weight=1)
+    incid_frame.rowconfigure(0, weight=1)
+
+    for col, header in zip(incid_columns, incid_headers):
+        tree_inc.heading(col, text=header)
+        if col == "mensaje":
+            tree_inc.column(col, width=280, stretch=True)
+        elif col in {"fecha", "hora", "estado"}:
+            tree_inc.column(col, width=100, stretch=False)
+        elif col == "telefono":
+            tree_inc.column(col, width=120, stretch=False)
+        elif col == "mensaje_id":
+            tree_inc.column(col, width=260, stretch=True)
+        elif col in {"push_enviados", "push_fallidos"}:
+            tree_inc.column(col, width=110, stretch=False, anchor="center")
+        elif col == "push_error":
+            tree_inc.column(col, width=260, stretch=True)
+        else:
+            tree_inc.column(col, width=140, stretch=False)
+
+    incid_footer = ttk.Frame(incid_frame)
+    incid_footer.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+    incid_footer.columnconfigure(0, weight=1)
+
+    incid_total_var = tk.StringVar(value="Total: 0")
+    ttk.Label(incid_footer, textvariable=incid_total_var).grid(row=0, column=0, sticky="w")
+
+    btn_export_inc = ttk.Button(incid_footer, text="Exportar CSV")
+    btn_export_inc.grid(row=0, column=1, padx=4)
+    btn_reintentar_inc = ttk.Button(incid_footer, text="Reintentar seleccionados")
+    btn_reintentar_inc.grid(row=0, column=2, padx=4)
+
+    pend_data: dict[str, dict] = {}
+    inc_data: dict[str, dict] = {}
+
+    def _safe_str(value) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    def _to_datetime(value: object) -> Optional[datetime.datetime]:
+        if value is None:
+            return None
+        if hasattr(value, "to_datetime"):
+            try:
+                value = value.to_datetime()
+            except Exception:
+                return None
+        if isinstance(value, datetime.datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=datetime.timezone.utc)
+            return value
+        return None
+
+    def _parse_fecha_desde() -> Optional[datetime.datetime]:
+        if DateEntry and isinstance(fecha_desde_widget, DateEntry):
+            try:
+                selected = fecha_desde_widget.get_date()
+            except Exception:
+                return None
+            if not selected:
+                return None
+            tz_local = datetime.datetime.now().astimezone().tzinfo or datetime.timezone.utc
+            return datetime.datetime(selected.year, selected.month, selected.day, tzinfo=tz_local).astimezone(datetime.timezone.utc)
+        valor = fecha_desde_widget.get().strip()
+        if not valor:
+            return None
         try:
-            snapshot = with_retry(
-                lambda: db.collection("Mensajes").where(
-                    filter=FieldFilter("estado", "==", "Pendiente")
-                ).get()
-            )
-            if not snapshot:
-                info(root, "Notificaciones", "No hay mensajes pendientes.")
-                return
+            fecha = datetime.datetime.strptime(valor, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise ValueError("Fecha inválida. Usa AAAA-MM-DD.") from exc
+        tz_local = datetime.datetime.now().astimezone().tzinfo or datetime.timezone.utc
+        return datetime.datetime(fecha.year, fecha.month, fecha.day, tzinfo=tz_local).astimezone(datetime.timezone.utc)
 
-            total_enviados = 0
-            total_fallidos = 0
-            dedupe = 0
+    def _actualizar_botones():
+        btn_export_pend.config(state="normal" if pend_data else "disabled")
+        btn_reintentar_pend.config(state="normal" if pend_data else "disabled")
+        btn_export_inc.config(state="normal" if inc_data else "disabled")
+        btn_reintentar_inc.config(state="normal" if inc_data else "disabled")
 
-            for doc in snapshot:
-                datos = doc.to_dict() or {}
-                uid = datos.get("uid")
-                if not uid:
-                    logger.warning("Documento %s sin uid para envío push", doc.id)
-                usuario_data = (
-                    get_doc_safe(db.collection("UsuariosAutorizados").document(uid))
-                    if uid
-                    else {}
-                ) or {}
-                resultado = enviar_push_por_mensaje(
-                    db,
-                    doc.id,
-                    datos,
-                    usuario_data,
-                    actualizar_estado=True,
-                )
-                enviados = int(resultado.get("enviados", 0))
-                fallidos = int(resultado.get("fallidos", 0))
-                if enviados == 0 and fallidos == 0:
-                    dedupe += 1
-                total_enviados += enviados
-                total_fallidos += fallidos
+    def _exportar_csv(nombre_base: str, data_map: dict[str, dict], headers: tuple[str, ...]):
+        if not data_map:
+            info(root, "Exportar", "No hay datos para exportar.")
+            return
+        ruta = filedialog.asksaveasfilename(
+            parent=top,
+            defaultextension=".csv",
+            initialfile=f"{nombre_base}.csv",
+            filetypes=[("CSV", "*.csv"), ("Todos", "*.*")],
+        )
+        if not ruta:
+            return
+        try:
+            with open(ruta, "w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(headers)
+                for item in data_map.values():
+                    writer.writerow(item["values"])
+        except Exception as exc:
+            logger.exception("No se pudo exportar CSV")
+            error(root, "Exportar", f"No se pudo exportar el CSV: {exc}")
+            return
+        info(root, "Exportar", f"Archivo exportado: {ruta}")
 
-            if total_enviados > 0 and total_fallidos == 0:
-                info(root, "Resultado", f"✅ Notificaciones enviadas: {total_enviados}")
-            elif total_enviados > 0:
-                info(
-                    root,
-                    "Resultado",
-                    f"Notificaciones enviadas: {total_enviados}. Fallidas: {total_fallidos}",
-                )
-            elif dedupe > 0:
-                info(
-                    root,
-                    "Resultado",
-                    "No se enviaron notificaciones nuevas (ya estaban enviadas).",
+    def _datos_para_tabla(doc_id: str, doc_data: dict, user_data: dict, include_push: bool) -> tuple[str, ...]:
+        fecha = _safe_str(doc_data.get("dia"))
+        hora = _safe_str(doc_data.get("hora"))
+        fecha_ts = _to_datetime(doc_data.get("fechaHora"))
+        if fecha_ts:
+            local_dt = fecha_ts.astimezone()
+            if not fecha:
+                fecha = local_dt.strftime("%Y-%m-%d")
+            if not hora:
+                hora = local_dt.strftime("%H:%M")
+        uid = _safe_str(doc_data.get("uid"))
+        nombre = _safe_str(user_data.get("Nombre") or doc_data.get("Nombre"))
+        telefono = _safe_str(
+            doc_data.get("telefono")
+            or user_data.get("Telefono")
+            or user_data.get("telefono")
+        )
+        tipo = _safe_str(doc_data.get("tipo"))
+        mensaje = _safe_str(doc_data.get("mensaje") or doc_data.get("cuerpo"))
+        estado = _safe_str(doc_data.get("estado"))
+        base = (
+            fecha,
+            hora,
+            uid,
+            nombre,
+            telefono,
+            tipo,
+            mensaje,
+            estado,
+            doc_id,
+        )
+        if not include_push:
+            return base
+        push_error = _safe_str(doc_data.get("pushError"))
+        push_enviados = _safe_str(doc_data.get("pushEnviados"))
+        push_fallidos = _safe_str(doc_data.get("pushFallidos"))
+        return base + (push_error, push_enviados, push_fallidos)
+
+    def _consultar(fecha_desde_utc: Optional[datetime.datetime]):
+        pendientes: list[tuple[str, dict]] = []
+        incidencias: list[tuple[str, dict]] = []
+        vistos: set[str] = set()
+
+        query_pend = db.collection("Mensajes").where(filter=FieldFilter("estado", "==", "Pendiente"))
+        if fecha_desde_utc is not None:
+            query_pend = query_pend.where(filter=FieldFilter("fechaHora", ">=", fecha_desde_utc))
+        snapshot_pend = with_retry(lambda: list(query_pend.stream()))
+        for doc in snapshot_pend:
+            data = doc.to_dict() or {}
+            pendientes.append((doc.id, data))
+            vistos.add(doc.id)
+
+        try:
+            query_null = db.collection("Mensajes").where(filter=FieldFilter("estado", "==", None))
+            if fecha_desde_utc is not None:
+                query_null = query_null.where(filter=FieldFilter("fechaHora", ">=", fecha_desde_utc))
+            snapshot_null = with_retry(lambda: list(query_null.stream()))
+        except Exception:
+            logger.exception("No se pudo consultar mensajes con estado nulo")
+            snapshot_null = []
+        for doc in snapshot_null:
+            if doc.id in vistos:
+                continue
+            data = doc.to_dict() or {}
+            pendientes.append((doc.id, data))
+            vistos.add(doc.id)
+
+        try:
+            if fecha_desde_utc is not None:
+                extra_query = (
+                    db.collection("Mensajes")
+                    .where(filter=FieldFilter("fechaHora", ">=", fecha_desde_utc))
+                    .order_by("fechaHora")
                 )
             else:
-                info(root, "Resultado", "No se enviaron notificaciones.")
-        except Exception as exc:
-            logger.exception("No se pudieron enviar notificaciones")
-            error(root, "Error", f"No se pudieron enviar notificaciones: {exc}")
+                extra_query = (
+                    db.collection("Mensajes")
+                    .order_by("fechaHora", direction=firestore.Query.DESCENDING)
+                    .limit(200)
+                )
+            extra_docs = with_retry(lambda: list(extra_query.stream()))
+        except Exception:
+            logger.exception("No se pudo obtener mensajes adicionales para pendientes")
+            extra_docs = []
+        for doc in extra_docs:
+            if doc.id in vistos:
+                continue
+            data = doc.to_dict() or {}
+            estado_val = data.get("estado")
+            if estado_val in (None, "", "Pendiente"):
+                pendientes.append((doc.id, data))
+                vistos.add(doc.id)
 
-    run_bg(worker, _thread_name="enviar_notificaciones_push")
+        query_inc = db.collection("Mensajes").where(
+            filter=FieldFilter("estado", "in", ["ErrorPush", "Parcial", "SinToken"])
+        )
+        if fecha_desde_utc is not None:
+            query_inc = query_inc.where(filter=FieldFilter("fechaHora", ">=", fecha_desde_utc))
+        snapshot_inc = with_retry(lambda: list(query_inc.stream()))
+        for doc in snapshot_inc:
+            data = doc.to_dict() or {}
+            incidencias.append((doc.id, data))
+
+        return pendientes, incidencias
+
+    def refrescar():
+        try:
+            fecha_desde_utc = _parse_fecha_desde()
+        except ValueError as exc:
+            messagebox.showerror("Fecha", str(exc), parent=top)
+            return
+
+        btn_refrescar.config(state="disabled")
+        pend_total_var.set("Total: …")
+        incid_total_var.set("Total: …")
+
+        def worker():
+            try:
+                pendientes, incidencias = _consultar(fecha_desde_utc)
+            except Exception as exc:
+                logger.exception("No se pudo cargar el estado de notificaciones")
+
+                def _error():
+                    btn_refrescar.config(state="normal")
+                    error(root, "Estado notificaciones", f"No se pudo cargar el estado: {exc}")
+
+                top.after(0, _error)
+                return
+
+            uid_cache: dict[str, dict] = {}
+
+            def _usuario(uid: str) -> dict:
+                if not uid:
+                    return {}
+                if uid not in uid_cache:
+                    uid_cache[uid] = get_doc_safe(
+                        db.collection("UsuariosAutorizados").document(uid)
+                    ) or {}
+                return uid_cache[uid]
+
+            pend_rows: list[dict] = []
+            for doc_id, data in pendientes:
+                usuario = _usuario(_safe_str(data.get("uid")))
+                valores = _datos_para_tabla(doc_id, data, usuario, include_push=False)
+                pend_rows.append({"doc_id": doc_id, "doc": data, "usuario": usuario, "values": valores})
+
+            inc_rows: list[dict] = []
+            for doc_id, data in incidencias:
+                usuario = _usuario(_safe_str(data.get("uid")))
+                valores = _datos_para_tabla(doc_id, data, usuario, include_push=True)
+                inc_rows.append({"doc_id": doc_id, "doc": data, "usuario": usuario, "values": valores})
+
+            def _actualizar():
+                btn_refrescar.config(state="normal")
+
+                for tree in (tree_pend, tree_inc):
+                    tree.delete(*tree.get_children())
+
+                pend_data.clear()
+                for row in pend_rows:
+                    tree_pend.insert("", "end", iid=row["doc_id"], values=row["values"])
+                    pend_data[row["doc_id"]] = row
+                pend_total_var.set(f"Total: {len(pend_rows)}")
+
+                inc_data.clear()
+                for row in inc_rows:
+                    tree_inc.insert("", "end", iid=row["doc_id"], values=row["values"])
+                    inc_data[row["doc_id"]] = row
+                incid_total_var.set(f"Total: {len(inc_rows)}")
+
+                _actualizar_botones()
+
+            top.after(0, _actualizar)
+
+        run_bg(worker, _thread_name="estado_notificaciones_refresh")
+
+    def _toggle_operaciones(state: str):
+        btn_refrescar.config(state=state)
+        btn_reintentar_pend.config(state=state)
+        btn_reintentar_inc.config(state=state)
+
+    def _reintentar_desde(tree_widget: ttk.Treeview):
+        seleccion = list(tree_widget.selection())
+        if not seleccion:
+            info(root, "Reintentar", "Selecciona al menos un mensaje para reintentar.")
+            return
+
+        _toggle_operaciones("disabled")
+
+        def worker():
+            total_env = total_fall = dedupe = 0
+            errores_locales: list[str] = []
+
+            for doc_id in seleccion:
+                try:
+                    snap = with_retry(lambda: db.collection("Mensajes").document(doc_id).get())
+                except Exception as exc:
+                    logger.exception("No se pudo obtener el mensaje %s", doc_id)
+                    errores_locales.append(f"{doc_id}: {exc}")
+                    continue
+                if not getattr(snap, "exists", False):
+                    errores_locales.append(f"{doc_id}: documento inexistente")
+                    continue
+                datos = snap.to_dict() or {}
+                uid = _safe_str(datos.get("uid"))
+                usuario = get_doc_safe(db.collection("UsuariosAutorizados").document(uid)) if uid else {}
+                resultado = enviar_push_por_mensaje(
+                    db,
+                    doc_id,
+                    datos,
+                    usuario or {},
+                    actualizar_estado=True,
+                    force=True,
+                )
+                env = int(resultado.get("enviados", 0))
+                fall = int(resultado.get("fallidos", 0))
+                if env == 0 and fall == 0:
+                    dedupe += 1
+                total_env += env
+                total_fall += fall
+
+            def _fin():
+                _toggle_operaciones("normal")
+                mensajes = []
+                if total_env:
+                    mensajes.append(f"Enviadas: {total_env}")
+                if total_fall:
+                    mensajes.append(f"Fallidas: {total_fall}")
+                if dedupe:
+                    mensajes.append(f"Duplicadas: {dedupe}")
+                if errores_locales:
+                    detalle = "; ".join(errores_locales[:5])
+                    if len(errores_locales) > 5:
+                        detalle += " …"
+                    mensajes.append(f"Errores: {detalle}")
+                texto = ", ".join(mensajes) or "No se envió ninguna notificación."
+                if total_env and not total_fall and not errores_locales:
+                    info(root, "Reintentar", f"✅ {texto}")
+                else:
+                    info(root, "Reintentar", texto)
+                refrescar()
+
+            top.after(0, _fin)
+
+        run_bg(worker, _thread_name="estado_notificaciones_reintentar")
+
+    def exportar_pendientes():
+        _exportar_csv("notificaciones_pendientes", pend_data, pendiente_headers)
+
+    def exportar_incidencias():
+        _exportar_csv("notificaciones_incidencias", inc_data, incid_headers)
+
+    btn_refrescar.config(command=refrescar)
+    btn_export_pend.config(command=exportar_pendientes)
+    btn_export_inc.config(command=exportar_incidencias)
+    btn_reintentar_pend.config(command=lambda: _reintentar_desde(tree_pend))
+    btn_reintentar_inc.config(command=lambda: _reintentar_desde(tree_inc))
+
+    _actualizar_botones()
+    refrescar()
 
 def crear_mensajes_para_todos():
     mensaje = simpledialog.askstring(
@@ -415,14 +827,17 @@ def _crear_mensajes_para_todos_bg(mensaje: str) -> None:
                 data = usuario.to_dict() or {}
                 telefono = data.get("Telefono", "")
 
-                ahora = datetime.datetime.now()
-                doc_id = f"{uid}_{ahora.strftime('%Y-%m-%dT%H-%M-%S-%f')}"
+                ahora = datetime.datetime.now(datetime.timezone.utc)
+                doc_id = build_mensaje_id(uid, ahora)
+                local_now = ahora.astimezone()
                 doc = {
                     "estado": "Pendiente",
                     "fechaHora": ahora,
                     "mensaje": mensaje,
                     "telefono": telefono,
                     "uid": uid,
+                    "dia": local_now.strftime("%Y-%m-%d"),
+                    "hora": local_now.strftime("%H:%M"),
                 }
 
                 batch.set(mensajes_col.document(doc_id), doc, timeout=30.0)
@@ -666,7 +1081,14 @@ btn_crear_auto = tk.Button(
 )
 btn_crear_auto.pack(pady=5)
 btn_crear_auto.pack_forget()  # Botón ocultado a petición: "Crear mensajes automáticos"
-tk.Button(frame, text="📲 Enviar notificaciones push", command=enviar_notificaciones_push, height=2, width=40, bg="lightgreen").pack(pady=5)
+tk.Button(
+    frame,
+    text="📊 Estado notificaciones",
+    command=abrir_estado_notificaciones,
+    height=2,
+    width=40,
+    bg="lightgreen",
+).pack(pady=5)
 tk.Button(frame, text="👥 Gestionar Usuarios", command=lambda: abrir_gestion_usuarios(db), height=2, width=40, bg="lightyellow").pack(pady=5)
 tk.Button(frame, text="📜 Gestionar Mensajes", command=lambda: abrir_gestion_mensajes(db), height=2, width=40).pack(pady=5)
 tk.Button(frame, text="Peticiones de Días Libres", command=lambda: abrir_gestion_peticiones(db), height=2, width=40).pack(pady=5)

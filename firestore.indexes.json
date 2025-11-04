@@ -7,6 +7,14 @@
         { "fieldPath": "mensaje", "order": "ASCENDING" },
         { "fieldPath": "dia", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "Mensajes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "estado", "order": "ASCENDING" },
+        { "fieldPath": "fechaHora", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []
