@@ -4,11 +4,12 @@ from tkcalendar import Calendar
 import pyodbc
 import os
 from firebase_admin import auth, firestore
+from google.api_core.exceptions import AlreadyExists
 import datetime as dt
 from datetime import date, timedelta, timezone
 import re
 from decimal import Decimal
-from typing import Optional, Union, Dict, Iterable, Tuple, List, Any
+from typing import Optional, Union, Dict, Iterable, Tuple, List, Any, Set
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -739,6 +740,230 @@ def abrir_gestion_usuarios(db):
     upcoming_by_uid: Dict[str, List[date]] = defaultdict(list)
     cal_popup: Optional[tk.Toplevel] = None
     cal_uid: Optional[str] = None
+    dni_dialog_abierto = False
+
+    def _local_timezone():
+        tz = dt.datetime.now().astimezone().tzinfo
+        return tz or timezone.utc
+
+    def _to_timestamp_inicio_dia(dia: date) -> dt.datetime:
+        tz = _local_timezone()
+        return dt.datetime(dia.year, dia.month, dia.day, tzinfo=tz)
+
+    def _yyyymmdd(dia: date) -> str:
+        return dia.strftime("%Y%m%d")
+
+    def crear_peticiones_en_firestore(uid: str, dias: Set[date], motivo: str) -> tuple[int, int]:
+        nuevas = 0
+        duplicadas = 0
+        coleccion = db.collection("Peticiones")
+        tz = _local_timezone()
+
+        for dia in sorted(dias):
+            doc_id = f"{uid}_{_yyyymmdd(dia)}"
+            doc_ref = coleccion.document(doc_id)
+            payload = {
+                "uid": uid,
+                "Fecha": _to_timestamp_inicio_dia(dia),
+                "Motivo": motivo,
+                "Admitido": "Pendiente",
+                "creadoEn": dt.datetime.now(tz=tz),
+            }
+            try:
+                doc_ref.create(payload)
+                nuevas += 1
+            except AlreadyExists:
+                duplicadas += 1
+            except Exception:
+                raise
+
+        return nuevas, duplicadas
+
+    def abrir_dialogo_peticiones(usuario: Dict[str, Any] | None) -> None:
+        nonlocal dni_dialog_abierto
+        if not usuario or dni_dialog_abierto:
+            return
+
+        uid = usuario.get("UID")
+        if not uid:
+            messagebox.showwarning(
+                "Peticiones",
+                "No se pudo determinar el UID del usuario seleccionado.",
+            )
+            return
+
+        nombre_usuario = usuario.get("Nombre") or ""
+        dni_usuario = usuario.get("Dni") or ""
+
+        dni_dialog_abierto = True
+        dialogo: tk.Toplevel | None = None
+
+        def cerrar() -> None:
+            nonlocal dialogo
+            try:
+                ventana.attributes("-disabled", False)
+            except Exception:
+                pass
+            if dialogo is None:
+                ventana.focus_force()
+                return
+            try:
+                dialogo.grab_release()
+            except Exception:
+                pass
+            if dialogo.winfo_exists():
+                dialogo.destroy()
+            dialogo = None
+            ventana.focus_force()
+
+        try:
+            dialogo = tk.Toplevel(ventana)
+            dialogo.title(f"Peticiones de días libres - {nombre_usuario} ({dni_usuario})")
+            dialogo.transient(ventana)
+            dialogo.grab_set()
+            dialogo.resizable(False, False)
+
+            try:
+                ventana.attributes("-disabled", True)
+            except Exception:
+                pass
+
+            contenido = ttk.Frame(dialogo, padding=16)
+            contenido.grid(row=0, column=0, sticky="nsew")
+            dialogo.grid_rowconfigure(0, weight=1)
+            dialogo.grid_columnconfigure(0, weight=1)
+
+            cal_kwargs = {
+                "selectmode": "day",
+                "firstweekday": "monday",
+                "showweeknumbers": False,
+            }
+            try:
+                calendario = Calendar(contenido, locale="es_ES", **cal_kwargs)
+            except Exception:
+                calendario = Calendar(contenido, **cal_kwargs)
+            calendario.grid(row=0, column=0, columnspan=2, sticky="nsew")
+            calendario.tag_config("sel", background="#1e88e5", foreground="white")
+
+            seleccionados: Set[date] = set()
+            eventos_por_dia: Dict[date, int] = {}
+            dias_var = tk.StringVar(value="Días seleccionados: 0")
+
+            def _actualizar_label() -> None:
+                dias_var.set(f"Días seleccionados: {len(seleccionados)}")
+
+            def _agregar_dia(dia: date) -> None:
+                if dia in seleccionados:
+                    return
+                seleccionados.add(dia)
+                eventos_por_dia[dia] = calendario.calevent_create(dia, "seleccionado", "sel")
+                _actualizar_label()
+
+            def _quitar_dia(dia: date) -> None:
+                if dia not in seleccionados:
+                    return
+                seleccionados.remove(dia)
+                event_id = eventos_por_dia.pop(dia, None)
+                if event_id is not None:
+                    calendario.calevent_remove(event_id)
+                _actualizar_label()
+
+            def _toggle_dia(_event=None) -> None:
+                try:
+                    dia_sel = calendario.selection_get()
+                except Exception:
+                    return
+                if not isinstance(dia_sel, date):
+                    return
+                if dia_sel in seleccionados:
+                    _quitar_dia(dia_sel)
+                else:
+                    _agregar_dia(dia_sel)
+
+            calendario.bind("<<CalendarSelected>>", _toggle_dia)
+
+            ttk.Label(contenido, textvariable=dias_var).grid(
+                row=1, column=0, columnspan=2, sticky="w", pady=(8, 4)
+            )
+
+            botones_cal = ttk.Frame(contenido)
+            botones_cal.grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 12))
+
+            def _dia_actual() -> date | None:
+                try:
+                    dia_sel = calendario.selection_get()
+                except Exception:
+                    return None
+                return dia_sel if isinstance(dia_sel, date) else None
+
+            ttk.Button(
+                botones_cal,
+                text="Añadir selección",
+                command=lambda: (_agregar_dia(d) if (d := _dia_actual()) else None),
+            ).grid(row=0, column=0, padx=(0, 8))
+            ttk.Button(
+                botones_cal,
+                text="Quitar selección",
+                command=lambda: (_quitar_dia(d) if (d := _dia_actual()) else None),
+            ).grid(row=0, column=1)
+
+            ttk.Label(contenido, text="Motivo:").grid(row=3, column=0, columnspan=2, sticky="w")
+            motivo_text = tk.Text(contenido, height=5, width=40)
+            motivo_text.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(4, 0))
+
+            contenido.grid_rowconfigure(4, weight=1)
+            contenido.grid_columnconfigure(0, weight=1)
+            contenido.grid_columnconfigure(1, weight=1)
+
+            botones_accion = ttk.Frame(contenido)
+            botones_accion.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
+
+            def cancelar() -> None:
+                cerrar()
+
+            def aceptar() -> None:
+                if not seleccionados:
+                    messagebox.showwarning("Peticiones", "Selecciona al menos un día del calendario.")
+                    return
+                motivo = motivo_text.get("1.0", tk.END).strip()
+                if not motivo:
+                    messagebox.showwarning("Peticiones", "El motivo no puede estar vacío.")
+                    return
+
+                total_dias = len(seleccionados)
+                if not messagebox.askokcancel(
+                    "Peticiones",
+                    f"Se van a crear {total_dias} peticiones de días libres para {nombre_usuario} ({dni_usuario}). ¿Desea continuar?",
+                ):
+                    return
+
+                try:
+                    nuevas, duplicadas = crear_peticiones_en_firestore(uid, seleccionados, motivo)
+                except Exception as exc:
+                    messagebox.showerror(
+                        "Peticiones",
+                        f"No se pudieron crear las peticiones:\n\n{exc}",
+                    )
+                    return
+
+                cerrar()
+                refrescar()
+                messagebox.showinfo(
+                    "Peticiones",
+                    f"Peticiones creadas: {nuevas}\nDuplicadas: {duplicadas}\nUsuario: {nombre_usuario} ({dni_usuario})",
+                )
+
+            ttk.Button(botones_accion, text="Aceptar", command=aceptar).grid(row=0, column=0, padx=(0, 8))
+            ttk.Button(botones_accion, text="Cancelar", command=cancelar).grid(row=0, column=1)
+
+            dialogo.protocol("WM_DELETE_WINDOW", cancelar)
+            motivo_text.focus_set()
+
+            ventana.wait_window(dialogo)
+        finally:
+            cerrar()
+            dni_dialog_abierto = False
+
 
     ventana.grid_rowconfigure(2, weight=1)
     ventana.grid_columnconfigure(0, weight=1)
@@ -904,6 +1129,26 @@ def abrir_gestion_usuarios(db):
                 n += 1
         contador_var.set(f"Seleccionados con Mensaje=True: {n}")
 
+    def manejar_click_dni(event):
+        tree.after(1, actualizar_contador)
+        if getattr(event, "num", 1) != 1:
+            return
+        if tree.identify("region", event.x, event.y) != "cell":
+            return
+        item_id = tree.identify_row(event.y)
+        col_id = tree.identify_column(event.x)
+        if not item_id or not col_id:
+            return
+        try:
+            col_index = int(col_id.replace("#", "")) - 1
+        except ValueError:
+            return
+        if col_index < 0 or col_index >= len(columnas):
+            return
+        if columnas[col_index] != "Dni":
+            return
+        abrir_dialogo_peticiones(rows_by_iid.get(item_id))
+
     def __apply_reset_in_ui(uids):
         """Actualiza la columna Mensaje a False en la UI abierta."""
 
@@ -1037,6 +1282,10 @@ def abrir_gestion_usuarios(db):
         col = tree.identify_column(event.x)
         col_index = int(col.replace("#", "")) - 1
         col_nombre = columnas[col_index]
+
+        if col_nombre == "Dni":
+            abrir_dialogo_peticiones(rows_by_iid.get(item_id))
+            return
 
         if col_nombre in ["Mensaje", "Seleccionable", "Valor"]:
             val = tree.set(item_id, col_nombre)
@@ -1460,7 +1709,7 @@ def abrir_gestion_usuarios(db):
 
     tree.bind("<Double-1>", editar_celda)
     tree.bind("<<TreeviewSelect>>", actualizar_contador)
-    tree.bind("<ButtonRelease-1>", lambda e: tree.after(1, actualizar_contador))
+    tree.bind("<ButtonRelease-1>", manejar_click_dni)
     tree.bind("<Motion>", _hover_calendar)
     tree.bind("<Leave>", lambda e: _hide_cal_popup())
     tree.bind("<ButtonPress-1>", lambda e: _hide_cal_popup())
