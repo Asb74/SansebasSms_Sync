@@ -76,7 +76,7 @@ def abrir_informes(
 
     ttk.Button(
         contenedor,
-        text="Control de asistencia (Fichajes001)",
+        text="Control de asistencia",
         command=_abrir_informe_asistencia,
         width=36,
     ).pack()
