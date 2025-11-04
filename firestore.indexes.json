@@ -12,6 +12,14 @@
       "collectionGroup": "Mensajes",
       "queryScope": "COLLECTION",
       "fields": [
+        { "fieldPath": "dia", "order": "ASCENDING" },
+        { "fieldPath": "fechaHora", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "Mensajes",
+      "queryScope": "COLLECTION",
+      "fields": [
         { "fieldPath": "estado", "order": "ASCENDING" },
         { "fieldPath": "fechaHora", "order": "DESCENDING" }
       ]
