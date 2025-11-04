@@ -42,6 +42,51 @@ from thread_utils import run_bg
 logger = logging.getLogger(__name__)
 
 
+# --- Conversión de fechas ---
+
+
+def dia_to_yyyymmdd(dia_str: str) -> str:
+    s = (dia_str or "").strip()
+    formatos = ["%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"]
+    for ft in formatos:
+        try:
+            dt = datetime.strptime(s, ft)
+            return dt.strftime("%Y%m%d")
+        except ValueError:
+            pass
+    if len(s) == 8 and s.isdigit():
+        return s
+    raise ValueError(f"Formato de día no reconocido: {dia_str!r}")
+
+
+# --- Conversión Codigo <-> IdEmpleado ---
+
+
+def obtener_len_idempleado(conn) -> int:
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT MAX(Len([IdEmpleado])) FROM [FICHAJES001]")
+        n = cur.fetchone()[0] or 9
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return int(n)
+
+
+def codigo_to_idempleado(codigo: str, width: int) -> str:
+    c = "".join(ch for ch in str(codigo or "").strip() if ch.isdigit())
+    if c == "":
+        return ""
+    return c.zfill(width)
+
+
+def idempleado_to_codigo(idemp: str) -> str:
+    s = (idemp or "").strip().lstrip("0")
+    return s if s != "" else "0"
+
+
 CONFIG_PATH = Path("config.json")
 
 
@@ -56,6 +101,7 @@ class TablaFichajesNoEncontradaError(RuntimeError):
 _cfg_cache: Optional[Dict[str, Any]] = None
 _conn_fich: Optional[Any] = None
 _conn_fich_path: Optional[str] = None
+_len_idempleado: int = 9
 
 
 _COLUMNAS_LLAMADOS: Sequence[str] = (
@@ -162,7 +208,7 @@ def list_tables(conn: Optional[Any]) -> List[str]:
 def _abrir_conexion_fichajes() -> None:
     """Abre la conexión configurada para la base de datos de fichajes."""
 
-    global _conn_fich, _conn_fich_path
+    global _conn_fich, _conn_fich_path, _len_idempleado
 
     cfg = _load_cfg()
     ruta = str(cfg.get("access_fichajes_mdb") or "").strip()
@@ -193,6 +239,12 @@ def _abrir_conexion_fichajes() -> None:
 
     _conn_fich_path = ruta
 
+    try:
+        _len_idempleado = obtener_len_idempleado(_conn_fich)
+    except Exception:
+        logger.exception("No se pudo determinar la longitud de IdEmpleado en FICHAJES001")
+        _len_idempleado = 9
+
     tablas = list_tables(_conn_fich)
     resumen = ", ".join(tablas[:30]) if tablas else "(sin tablas)"
     if len(tablas) > 30:
@@ -209,6 +261,7 @@ def _cerrar_conexion_fichajes() -> None:
             pass
     _conn_fich = None
     _conn_fich_path = None
+    _len_idempleado = 9
 
 
 def abrir_informe_asistencia(
@@ -643,7 +696,10 @@ def _generar_bg(fecha: date, tipo: str) -> None:
             raise RuntimeError("No se pudo acceder a la base de datos de fichajes.")
 
         fecha_texto = fecha.strftime("%d-%m-%Y")
-        fecha_yyyymmdd = fecha.strftime("%Y%m%d")
+        try:
+            fecha_ui_yyyymmdd = dia_to_yyyymmdd(fecha.strftime("%Y-%m-%d"))
+        except ValueError:
+            fecha_ui_yyyymmdd = fecha.strftime("%Y%m%d")
 
         _log_firestore_context(_db)
         mensajes = get_mensajes(_db, fecha, tipo)
@@ -651,7 +707,7 @@ def _generar_bg(fecha: date, tipo: str) -> None:
         usuarios_por_codigo = get_usuarios_por_codigo(usuarios_map)
 
         try:
-            presentes = get_codigos_presentes(fecha_yyyymmdd, conn)
+            idempleados_presentes = get_idempleados_presentes(fecha_ui_yyyymmdd, conn)
         except ProgrammingError as exc:
             if _es_error_tabla_inexistente(exc):
                 raise _crear_error_tabla_inexistente(conn) from exc
@@ -672,7 +728,8 @@ def _generar_bg(fecha: date, tipo: str) -> None:
             nombre = _limpiar_str((usuario or {}).get("Nombre")) or "N/D"
             turno = _limpiar_str((usuario or {}).get("Turno")) or "N/D"
 
-            fecha_mensaje = _limpiar_str(mensaje.get("dia")) or "N/D"
+            dia_doc = _limpiar_str(mensaje.get("dia"))
+            fecha_mensaje = dia_doc or "N/D"
             hora_mensaje = _limpiar_str(mensaje.get("hora")) or "N/D"
 
             mensaje_tipo = _limpiar_str(mensaje.get("mensaje")) or tipo
@@ -680,12 +737,26 @@ def _generar_bg(fecha: date, tipo: str) -> None:
 
             presente = False
             if codigo_valido:
-                try:
-                    presente = asiste(codigo_valido, fecha_yyyymmdd, conn)
-                except ProgrammingError as exc:
-                    if _es_error_tabla_inexistente(exc):
-                        raise _crear_error_tabla_inexistente(conn) from exc
-                    raise
+                fecha_yyyymmdd_doc = ""
+                if dia_doc:
+                    try:
+                        fecha_yyyymmdd_doc = dia_to_yyyymmdd(dia_doc)
+                    except ValueError:
+                        logger.warning(
+                            "No se pudo interpretar la fecha del mensaje %s: %s",
+                            mensaje.get("doc_id"),
+                            dia_doc,
+                        )
+                if not fecha_yyyymmdd_doc:
+                    fecha_yyyymmdd_doc = fecha_ui_yyyymmdd
+                idempleado = codigo_to_idempleado(codigo_valido, _len_idempleado)
+                if idempleado:
+                    try:
+                        presente = asiste(idempleado, fecha_yyyymmdd_doc, conn)
+                    except ProgrammingError as exc:
+                        if _es_error_tabla_inexistente(exc):
+                            raise _crear_error_tabla_inexistente(conn) from exc
+                        raise
             asiste_texto = "SI" if presente else "NO"
 
             fila = {
@@ -709,7 +780,11 @@ def _generar_bg(fecha: date, tipo: str) -> None:
         }
 
         presentes_codigos = {
-            idempleado_a_codigo(str(idemp)) for idemp in presentes
+            codigo
+            for codigo in (
+                idempleado_to_codigo(str(idemp)) for idemp in idempleados_presentes
+            )
+            if codigo
         }
         sin_mensaje_codigos = {
             codigo for codigo in presentes_codigos if codigo and codigo not in codigos_con_mensaje
@@ -882,7 +957,7 @@ def get_usuarios_por_codigo(
     return indice
 
 
-def get_codigos_presentes(fecha: str, conn: Optional[Any]) -> set[str]:
+def get_idempleados_presentes(fecha_yyyymmdd: str, conn: Optional[Any]) -> set[str]:
     if pyodbc is None or conn is None:
         return set()
 
@@ -891,7 +966,7 @@ def get_codigos_presentes(fecha: str, conn: Optional[Any]) -> set[str]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT DISTINCT [IdEmpleado] FROM [FICHAJES001] WHERE [Fecha] = ?",
-            fecha,
+            (fecha_yyyymmdd,),
         )
         filas = cursor.fetchall()
     except ProgrammingError:
@@ -907,24 +982,14 @@ def get_codigos_presentes(fecha: str, conn: Optional[Any]) -> set[str]:
     for fila in filas:
         valor = fila[0]
         if valor is not None:
-            codigo = _limpiar_str(valor)
-            if codigo:
-                presentes.add(codigo)
+            presentes.add(str(valor))
     return presentes
 
 
-def idempleado_a_codigo(idemp: str) -> str:
-    idemp = (idemp or "").strip()
-    if not idemp:
-        return ""
-    try:
-        return str(int(idemp))
-    except Exception:
-        return idemp
-
-
-def asiste(codigo: str, fecha: str, conn: Optional[Any]) -> bool:
+def asiste(idempleado: str, fecha_yyyymmdd: str, conn: Optional[Any]) -> bool:
     if pyodbc is None or conn is None:
+        return False
+    if not (idempleado and fecha_yyyymmdd):
         return False
 
     cursor = None
@@ -932,8 +997,7 @@ def asiste(codigo: str, fecha: str, conn: Optional[Any]) -> bool:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT TOP 1 1 FROM [FICHAJES001] WHERE [Fecha] = ? AND [IdEmpleado] = ?",
-            fecha,
-            codigo,
+            (fecha_yyyymmdd, idempleado),
         )
         return cursor.fetchone() is not None
     except ProgrammingError:
