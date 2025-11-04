@@ -22,6 +22,7 @@ from google.oauth2 import service_account
 from GestionUsuarios import abrir_gestion_usuarios
 from GestionMensajes import abrir_gestion_mensajes
 from GenerarMensajes import abrir_generar_mensajes
+from notificaciones_push import NOTI_DB, enviar_push_por_mensaje
 import re
 from decimal import Decimal
 from typing import List, Optional, Tuple
@@ -72,7 +73,7 @@ def _is_valid_fcm_token(token: Optional[str]) -> bool:
 credenciales_dinamicas = {"ruta": "sansebassms.json"}
 project_info = {"id": None}
 carpeta_excel = {"ruta": None}
-archivo_notificados = "notificados.json"
+archivo_notificados = NOTI_DB
 
 ventana: Optional[tk.Misc] = None
 estado: Optional[tk.StringVar] = None
@@ -92,6 +93,32 @@ def _set_estado_async(texto: str) -> None:
     if root_ref is None or estado is None:
         return
     root_ref.after(0, lambda: estado.set(texto))
+
+
+def _leer_notificados_local() -> list[str]:
+    if not os.path.exists(archivo_notificados):
+        return []
+    try:
+        with open(archivo_notificados, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            ids = data.get("ids", [])
+        elif isinstance(data, list):
+            ids = data
+        else:
+            ids = []
+        return [str(i) for i in ids if i]
+    except Exception:
+        logger.exception("No se pudo leer %s", archivo_notificados)
+        return []
+
+
+def _guardar_notificados_local(ids: list[str]) -> None:
+    try:
+        with open(archivo_notificados, "w", encoding="utf-8") as f:
+            json.dump({"ids": sorted(set(ids))}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        logger.exception("No se pudo guardar %s", archivo_notificados)
 
 
 def with_retry(fn, tries: int = 3, base: float = 0.5, cap: float = 5.0):
@@ -286,54 +313,50 @@ def enviar_notificaciones_push():
                 info(root, "Notificaciones", "No hay mensajes pendientes.")
                 return
 
-            token_oauth = obtener_token_oauth()
-            notificados = []
-            if os.path.exists(archivo_notificados):
-                with open(archivo_notificados, "r", encoding="utf-8") as f:
-                    notificados = json.load(f)
-
-            nuevos: list[str] = []
+            total_enviados = 0
+            total_fallidos = 0
+            dedupe = 0
 
             for doc in snapshot:
-                if doc.id in notificados:
-                    continue
-
                 datos = doc.to_dict() or {}
                 uid = datos.get("uid")
-                mensaje = datos.get("mensaje", "Tienes un mensaje pendiente")
-
                 if not uid:
-                    continue
-
-                usuario_data = get_doc_safe(db.collection("UsuariosAutorizados").document(uid))
-                if not usuario_data:
-                    logger.warning("Usuario %s no encontrado para envío FCM", uid)
-                    continue
-
-                token = usuario_data.get("fcmToken")
-                enviado = enviar_fcm(
-                    uid,
-                    token,
-                    token_oauth,
-                    notification={
-                        "title": "📩 Nuevo mensaje pendiente",
-                        "body": mensaje,
-                    },
-                    data={"accion": "abrir_usuario_screen"},
+                    logger.warning("Documento %s sin uid para envío push", doc.id)
+                usuario_data = (
+                    get_doc_safe(db.collection("UsuariosAutorizados").document(uid))
+                    if uid
+                    else {}
+                ) or {}
+                resultado = enviar_push_por_mensaje(
+                    db,
+                    doc.id,
+                    datos,
+                    usuario_data,
+                    actualizar_estado=True,
                 )
+                enviados = int(resultado.get("enviados", 0))
+                fallidos = int(resultado.get("fallidos", 0))
+                if enviados == 0 and fallidos == 0:
+                    dedupe += 1
+                total_enviados += enviados
+                total_fallidos += fallidos
 
-                if enviado:
-                    nuevos.append(doc.id)
-                elif token and not _is_valid_fcm_token(token):
-                    db.collection("UsuariosAutorizados").document(uid).update({"fcmToken": None})
-                    logger.info("Token FCM inválido limpiado para %s", uid)
-
-            if nuevos:
-                notificados.extend(nuevos)
-                with open(archivo_notificados, "w", encoding="utf-8") as f:
-                    json.dump(notificados, f)
-
-            info(root, "Resultado", f"✅ Notificaciones enviadas: {len(nuevos)}")
+            if total_enviados > 0 and total_fallidos == 0:
+                info(root, "Resultado", f"✅ Notificaciones enviadas: {total_enviados}")
+            elif total_enviados > 0:
+                info(
+                    root,
+                    "Resultado",
+                    f"Notificaciones enviadas: {total_enviados}. Fallidas: {total_fallidos}",
+                )
+            elif dedupe > 0:
+                info(
+                    root,
+                    "Resultado",
+                    "No se enviaron notificaciones nuevas (ya estaban enviadas).",
+                )
+            else:
+                info(root, "Resultado", "No se enviaron notificaciones.")
         except Exception as exc:
             logger.exception("No se pudieron enviar notificaciones")
             error(root, "Error", f"No se pudieron enviar notificaciones: {exc}")
@@ -575,10 +598,7 @@ def revisar_mensajes():
 
     def worker():
         try:
-            notificados: list[str] = []
-            if os.path.exists(archivo_notificados):
-                with open(archivo_notificados, "r", encoding="utf-8") as f:
-                    notificados = json.load(f)
+            notificados = _leer_notificados_local()
 
             nuevos = []
             snapshot = with_retry(
@@ -594,8 +614,7 @@ def revisar_mensajes():
                     notificados.append(doc.id)
 
             if nuevos:
-                with open(archivo_notificados, "w", encoding="utf-8") as f:
-                    json.dump(notificados, f)
+                _guardar_notificados_local(notificados)
             else:
                 info(root, "Mensajes", "No hay mensajes pendientes nuevos.")
         except Exception as exc:
