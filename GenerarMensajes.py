@@ -1,3 +1,4 @@
+import logging
 import tkinter as tk
 from tkinter import ttk, messagebox
 import datetime as dt
@@ -9,6 +10,10 @@ except Exception:  # pragma: no cover - tkcalendar opcional
     DateEntry = None  # type: ignore
 
 from GestionUsuarios import on_mensajes_generados
+from notificaciones_push import enviar_push_por_mensaje
+
+
+logger = logging.getLogger(__name__)
 
 
 def start_of_day_local_to_utc(d: date):
@@ -316,6 +321,10 @@ def abrir_generar_mensajes(db, preset=None):
             btn_guardar.config(state="normal")
             return
 
+        total_enviados = 0
+        total_fallidos = 0
+        total_dedupe = 0
+
         try:
             count = 0
             for uid, data_u in usuarios_filtrados:
@@ -333,7 +342,33 @@ def abrir_generar_mensajes(db, preset=None):
                     "hora": hora_str,
                     "fechaHora": fechaHora,
                 }
-                db.collection("Mensajes").document(doc_id).set(payload, merge=True)
+                doc_ref = db.collection("Mensajes").document(doc_id)
+                doc_ref.set(payload, merge=True)
+
+                try:
+                    user_snap = db.collection("UsuariosAutorizados").document(uid).get()
+                    user_data = user_snap.to_dict() if getattr(user_snap, "exists", False) else data_u
+                except Exception:
+                    logger.exception("No se pudo obtener usuario %s para notificación", uid)
+                    user_data = data_u
+
+                resultado = enviar_push_por_mensaje(
+                    db,
+                    doc_id,
+                    payload,
+                    user_data or {},
+                    actualizar_estado=True,
+                )
+                env = int(resultado.get("enviados", 0))
+                fall = int(resultado.get("fallidos", 0))
+                if env == 0 and fall == 0:
+                    total_dedupe += 1
+                total_enviados += env
+                total_fallidos += fall
+                logger.info(
+                    "Push %s -> enviados=%s fallidos=%s", doc_id, env, fall
+                )
+
                 count += 1
                 uids_afectados.append(uid)
                 ventana_generar.update_idletasks()
@@ -344,7 +379,27 @@ def abrir_generar_mensajes(db, preset=None):
 
         on_mensajes_generados(uids_afectados, db)
 
-        messagebox.showinfo("OK", f"Mensajes creados para {count} usuarios")
+        resumen = f"Mensajes creados para {count} usuarios"
+        if total_enviados > 0 and total_fallidos == 0:
+            messagebox.showinfo(
+                "Mensaje",
+                f"{resumen}. Notificaciones enviadas: {total_enviados}.",
+            )
+        elif total_enviados > 0:
+            messagebox.showwarning(
+                "Mensaje",
+                f"{resumen}. Notificaciones: {total_enviados} enviadas, {total_fallidos} fallidas.",
+            )
+        elif total_dedupe > 0:
+            messagebox.showinfo(
+                "Mensaje",
+                f"{resumen}. No se enviaron notificaciones nuevas (ya enviadas).",
+            )
+        else:
+            messagebox.showwarning(
+                "Mensaje",
+                f"{resumen}. No se pudo enviar ninguna notificación.",
+            )
         ventana_generar.destroy()
 
     btn_guardar.config(command=guardar)
