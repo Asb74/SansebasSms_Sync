@@ -326,10 +326,12 @@ def abrir_gestion_mensajes(db: firestore.Client) -> None:
         if not d:
             return
         nonlocal rows, row_by_doc
-        inicio, fin = start_end_of_day(d)
+        dia_str = d.strftime("%Y-%m-%d")
         t0 = time.perf_counter()
         try:
-            docs = db.collection("Mensajes").where("fechaHora", ">=", inicio).where("fechaHora", "<", fin).stream()
+            q = db.collection("Mensajes").where("dia", "==", dia_str)
+            q = q.order_by("fechaHora", direction=firestore.Query.DESCENDING)
+            docs = list(q.stream())
             datos = []
             row_by_doc = {}
             mensajes_unicos = set()
