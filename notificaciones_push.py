@@ -104,11 +104,11 @@ def enviar_push_por_mensaje(
         logging.warning("Usuario sin fcmToken; uid=%s", usuario.get("UID") or usuario.get("uid"))
         if actualizar_estado:
             db.collection("Mensajes").document(mensaje_id).update({
-                "estado": "SinToken",
-                "pushError": "Usuario sin fcmToken",
+                "pushEstado": "SinToken",
                 "pushEnviadoEn": firestore.SERVER_TIMESTAMP,
-                "pushFallidos": 1,
                 "pushEnviados": 0,
+                "pushFallidos": 1,
+                "pushError": "Usuario sin fcmToken",
             })
         return {"enviados": 0, "fallidos": 1}
 
@@ -149,22 +149,25 @@ def enviar_push_por_mensaje(
             if isinstance(exc, messaging.UnregisteredError):
                 tokens_a_remover.append(token)
 
-        estado_final = "OK"
+        push_estado = "OK"
         if fallidos:
-            estado_final = "Parcial" if enviados > 0 else "ErrorPush"
+            push_estado = "Parcial" if enviados > 0 else "ErrorPush"
+
+        if errores:
+            logging.warning(
+                "Errores enviando push %s: %s",
+                mensaje_id,
+                "; ".join(dict.fromkeys(errores)),
+            )
 
         if actualizar_estado:
-            update_payload = {
-                "estado": estado_final,
+            db.collection("Mensajes").document(mensaje_id).update({
+                "pushEstado": push_estado,
                 "pushEnviadoEn": firestore.SERVER_TIMESTAMP,
-                "pushFallidos": fallidos,
                 "pushEnviados": enviados,
-            }
-            if errores:
-                update_payload["pushError"] = "; ".join(dict.fromkeys(errores))
-            else:
-                update_payload["pushError"] = firestore.DELETE_FIELD
-            db.collection("Mensajes").document(mensaje_id).update(update_payload)
+                "pushFallidos": fallidos,
+                "pushError": None,
+            })
 
         if tokens_a_remover:
             _quitar_tokens_invalidos(db, mensaje_data, usuario, tokens_a_remover)
@@ -178,10 +181,10 @@ def enviar_push_por_mensaje(
         logging.exception("Error enviando push")
         if actualizar_estado:
             db.collection("Mensajes").document(mensaje_id).update({
-                "estado": "ErrorPush",
-                "pushError": str(e),
+                "pushEstado": "ErrorPush",
                 "pushEnviadoEn": firestore.SERVER_TIMESTAMP,
                 "pushFallidos": len(tokens),
                 "pushEnviados": 0,
+                "pushError": str(e),
             })
         return {"enviados": 0, "fallidos": len(tokens)}
