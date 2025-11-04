@@ -86,7 +86,6 @@ _date_var: Optional[tk.StringVar] = None
 _tipo_var: Optional[tk.StringVar] = None
 _tipo_combo: Optional[ttk.Combobox] = None
 _btn_generar: Optional[ttk.Button] = None
-_btn_probar_indice: Optional[ttk.Button] = None
 _tree_llamados: Optional[ttk.Treeview] = None
 _tree_sin_mensaje: Optional[ttk.Treeview] = None
 _total_llamados_var: Optional[tk.StringVar] = None
@@ -254,7 +253,7 @@ def abrir_informe_asistencia(
 
     def _al_cerrar() -> None:
         global _ventana, _date_widget, _date_var, _tipo_var, _tipo_combo
-        global _tree_llamados, _tree_sin_mensaje, _btn_generar, _btn_probar_indice
+        global _tree_llamados, _tree_sin_mensaje, _btn_generar
         global _datos_llamados, _datos_sin_mensaje, _fecha_actual
         global _total_llamados_var, _total_sin_msg_var
 
@@ -271,7 +270,6 @@ def abrir_informe_asistencia(
         _tree_llamados = None
         _tree_sin_mensaje = None
         _btn_generar = None
-        _btn_probar_indice = None
         _datos_llamados = []
         _datos_sin_mensaje = []
         _fecha_actual = None
@@ -284,7 +282,6 @@ def abrir_informe_asistencia(
 
 def _construir_ui(root: tk.Toplevel) -> None:
     global _date_widget, _date_var, _tipo_var, _tipo_combo, _btn_generar
-    global _btn_probar_indice
     global _tree_llamados, _tree_sin_mensaje
     global _total_llamados_var, _total_sin_msg_var
 
@@ -293,7 +290,7 @@ def _construir_ui(root: tk.Toplevel) -> None:
 
     filtros = ttk.Frame(root, padding=(18, 14))
     filtros.grid(row=0, column=0, sticky="ew")
-    filtros.columnconfigure(5, weight=1)
+    filtros.columnconfigure(4, weight=1)
 
     ttk.Label(filtros, text="Fecha:", font=("Segoe UI", 10, "bold")).grid(
         row=0, column=0, sticky="w"
@@ -320,13 +317,6 @@ def _construir_ui(root: tk.Toplevel) -> None:
 
     _btn_generar = ttk.Button(filtros, text="Generar", command=_generar)
     _btn_generar.grid(row=0, column=4, sticky="w")
-
-    _btn_probar_indice = ttk.Button(
-        filtros,
-        text="Probar índice",
-        command=_probar_indice,
-    )
-    _btn_probar_indice.grid(row=0, column=5, sticky="w", padx=(6, 0))
 
     cuerpo = ttk.Frame(root, padding=(18, 0, 18, 18))
     cuerpo.grid(row=1, column=0, sticky="nsew")
@@ -606,50 +596,6 @@ def _generar() -> None:
         lambda: _generar_bg(fecha, tipo),
         _thread_name="generar_informe_asistencia",
     )
-
-
-def _probar_indice() -> None:
-    if _db is None:
-        messagebox.showerror("Informe", "No hay conexión a Firestore.")
-        return
-
-    fecha = _obtener_fecha()
-    if fecha is None:
-        return
-
-    tipo = (_tipo_var.get().strip() if _tipo_var else "")
-    if not tipo:
-        messagebox.showwarning("Informe", "Selecciona un tipo de mensaje.")
-        return
-
-    if _btn_probar_indice is not None:
-        _btn_probar_indice.configure(state=tk.DISABLED)
-
-    def _worker() -> None:
-        try:
-            _log_firestore_context(_db)
-            mensajes = get_mensajes(_db, fecha, tipo)
-
-            def _ok() -> None:
-                if _btn_probar_indice is not None:
-                    _btn_probar_indice.configure(state=tk.NORMAL)
-                messagebox.showinfo(
-                    "Informe",
-                    f"Consulta exitosa. Mensajes encontrados: {len(mensajes)}",
-                )
-
-            _programar(_ok)
-        except Exception as exc:
-            logger.exception("Error al probar el índice de Firestore", exc_info=exc)
-
-            def _fail() -> None:
-                if _btn_probar_indice is not None:
-                    _btn_probar_indice.configure(state=tk.NORMAL)
-                messagebox.showerror("Informe", f"Error al probar el índice:\n\n{exc}")
-
-            _programar(_fail)
-
-    run_bg(_worker, _thread_name="probar_indice_informe_asistencia")
 
 
 def _obtener_fecha() -> Optional[date]:
