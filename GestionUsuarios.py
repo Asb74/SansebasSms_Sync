@@ -1584,6 +1584,7 @@ def abrir_gestion_usuarios(db):
         value1_entry: Optional[ttk.Entry] = None
         value2_entry: Optional[ttk.Entry] = None
         bool_var = tk.StringVar(value="True")
+        date_popups: Dict[str, tk.Toplevel] = {}
 
         if tipo_col == "bool":
             ttk.Label(filtro_avanzado, text="Valor:").grid(row=2, column=0, sticky="w")
@@ -1606,11 +1607,104 @@ def abrir_gestion_usuarios(db):
             operator_combo.grid(row=2, column=1, sticky="ew")
 
             ttk.Label(filtro_avanzado, text="Valor:").grid(row=3, column=0, sticky="w")
-            value1_entry = ttk.Entry(filtro_avanzado, textvariable=value1_var)
+            if tipo_col == "date":
+                def _cerrar_cal_popup(key: str) -> None:
+                    popup_cal = date_popups.pop(key, None)
+                    if popup_cal and popup_cal.winfo_exists():
+                        popup_cal.destroy()
+
+                def _abrir_calendario(entry: ttk.Entry, var: tk.StringVar, key: str) -> None:
+                    if entry.cget("state") == "disabled":
+                        return
+                    _cerrar_cal_popup(key)
+                    cal_popup = tk.Toplevel(popup)
+                    date_popups[key] = cal_popup
+                    cal_popup.transient(popup)
+                    cal_popup.resizable(False, False)
+                    try:
+                        cal_popup.attributes("-topmost", True)
+                    except Exception:
+                        pass
+                    x = entry.winfo_rootx()
+                    y = entry.winfo_rooty() + entry.winfo_height()
+                    cal_popup.geometry(f"+{x}+{y}")
+
+                    fecha_inicial = parse_access_date(var.get())
+                    cal_kwargs = {
+                        "selectmode": "day",
+                        "firstweekday": "monday",
+                        "showweeknumbers": False,
+                    }
+                    try:
+                        if isinstance(fecha_inicial, date):
+                            calendario = Calendar(
+                                cal_popup,
+                                locale="es_ES",
+                                year=fecha_inicial.year,
+                                month=fecha_inicial.month,
+                                day=fecha_inicial.day,
+                                **cal_kwargs,
+                            )
+                        else:
+                            calendario = Calendar(cal_popup, locale="es_ES", **cal_kwargs)
+                    except Exception:
+                        if isinstance(fecha_inicial, date):
+                            calendario = Calendar(
+                                cal_popup,
+                                year=fecha_inicial.year,
+                                month=fecha_inicial.month,
+                                day=fecha_inicial.day,
+                                **cal_kwargs,
+                            )
+                        else:
+                            calendario = Calendar(cal_popup, **cal_kwargs)
+                    calendario.pack()
+
+                    def _seleccionar_fecha(_event=None) -> None:
+                        try:
+                            seleccion = calendario.selection_get()
+                        except Exception:
+                            return
+                        if not isinstance(seleccion, date):
+                            return
+                        var.set(fmt_dmy(seleccion) or "")
+                        _cerrar_cal_popup(key)
+
+                    calendario.bind("<<CalendarSelected>>", _seleccionar_fecha)
+                    cal_popup.bind("<Escape>", lambda _e: _cerrar_cal_popup(key))
+
+                    def _cerrar_si_fuera() -> None:
+                        if cal_popup.winfo_exists() and cal_popup.focus_displayof() is None:
+                            _cerrar_cal_popup(key)
+
+                    cal_popup.bind("<FocusOut>", lambda _e: cal_popup.after(50, _cerrar_si_fuera))
+
+                value1_entry = ttk.Entry(filtro_avanzado, textvariable=value1_var, state="readonly")
+                value1_entry.bind(
+                    "<Button-1>",
+                    lambda _e, entry=value1_entry: _abrir_calendario(entry, value1_var, "value1"),
+                )
+                value1_entry.bind(
+                    "<Return>",
+                    lambda _e, entry=value1_entry: _abrir_calendario(entry, value1_var, "value1"),
+                )
+            else:
+                value1_entry = ttk.Entry(filtro_avanzado, textvariable=value1_var)
             value1_entry.grid(row=3, column=1, sticky="ew")
 
             ttk.Label(filtro_avanzado, text="Hasta:").grid(row=4, column=0, sticky="w")
-            value2_entry = ttk.Entry(filtro_avanzado, textvariable=value2_var)
+            if tipo_col == "date":
+                value2_entry = ttk.Entry(filtro_avanzado, textvariable=value2_var, state="readonly")
+                value2_entry.bind(
+                    "<Button-1>",
+                    lambda _e, entry=value2_entry: _abrir_calendario(entry, value2_var, "value2"),
+                )
+                value2_entry.bind(
+                    "<Return>",
+                    lambda _e, entry=value2_entry: _abrir_calendario(entry, value2_var, "value2"),
+                )
+            else:
+                value2_entry = ttk.Entry(filtro_avanzado, textvariable=value2_var)
             value2_entry.grid(row=4, column=1, sticky="ew")
 
         def _formatear_valor_filtro(valor: Any) -> str:
@@ -1631,14 +1725,22 @@ def abrir_gestion_usuarios(db):
             if operator_combo is not None:
                 operator_var.set(operadores_por_tipo.get(tipo_col, ["contiene"])[0])
 
+        def _set_entry_state(entry: Optional[ttk.Entry], enabled: bool) -> None:
+            if entry is None:
+                return
+            if tipo_col == "date":
+                entry.configure(state="readonly" if enabled else "disabled")
+            else:
+                entry.configure(state="normal" if enabled else "disabled")
+
         def _actualizar_visibilidad_operador(*_):
             modo_condicion = modo_var.get() == "condicion"
             widgets = []
             if operator_combo is not None:
                 widgets.append(operator_combo)
-            if value1_entry is not None:
+            if value1_entry is not None and tipo_col != "date":
                 widgets.append(value1_entry)
-            if value2_entry is not None:
+            if value2_entry is not None and tipo_col != "date":
                 widgets.append(value2_entry)
             for widget in widgets:
                 widget.configure(state="normal" if modo_condicion else "disabled")
@@ -1651,9 +1753,9 @@ def abrir_gestion_usuarios(db):
 
             if not modo_condicion:
                 if value1_entry is not None:
-                    value1_entry.configure(state="disabled")
+                    _set_entry_state(value1_entry, False)
                 if value2_entry is not None:
-                    value2_entry.configure(state="disabled")
+                    _set_entry_state(value2_entry, False)
                 return
 
             operator = operator_var.get()
@@ -1663,11 +1765,12 @@ def abrir_gestion_usuarios(db):
             elif operator != "entre":
                 value2_var.set("")
             if value1_entry is not None:
-                value1_entry.configure(
-                    state="normal" if operator not in {"vacías", "no vacías", "hoy", "este mes"} else "disabled"
+                _set_entry_state(
+                    value1_entry,
+                    operator not in {"vacías", "no vacías", "hoy", "este mes"},
                 )
             if value2_entry is not None:
-                value2_entry.configure(state="normal" if operator == "entre" else "disabled")
+                _set_entry_state(value2_entry, operator == "entre")
 
         if operator_combo is not None:
             operator_combo.bind("<<ComboboxSelected>>", _actualizar_visibilidad_operador)
@@ -1679,23 +1782,141 @@ def abrir_gestion_usuarios(db):
         entrada_busqueda = ttk.Entry(container, textvariable=busqueda_var)
         entrada_busqueda.grid(row=5, column=0, sticky="ew", pady=(0, 6))
 
-        valores_columna = _valores_unicos(col)
         valores_vars: Dict[str, tk.BooleanVar] = {}
         seleccion_actual = filtros_activos.get(col)
         seleccionar_todo_var = tk.BooleanVar(value=False)
 
-        for valor in valores_columna:
-            if seleccion_actual is None or seleccion_actual.selected_values is None:
-                seleccionado = True
+        def _asegurar_valores_vars(valores: set[str]) -> None:
+            for valor in valores:
+                if valor in valores_vars:
+                    continue
+                if seleccion_actual is None or seleccion_actual.selected_values is None:
+                    seleccionado = True
+                else:
+                    seleccionado = valor in seleccion_actual.selected_values
+                valores_vars[valor] = tk.BooleanVar(value=seleccionado)
+
+        def _filtro_local() -> Optional[FilterState]:
+            if modo_var.get() != "condicion":
+                return None
+            if tipo_col == "bool":
+                return FilterState(selected_values=None, operator="bool", value1=bool_var.get() == "True")
+            operador = operator_var.get()
+            if not operador:
+                return None
+            if operador in {"vacías", "no vacías", "hoy", "este mes"}:
+                return FilterState(selected_values=None, operator=operador, value1=None, value2=None)
+            valor1_raw = value1_var.get().strip()
+            if tipo_col == "number":
+                valor1 = _coerce_number(valor1_raw)
+            elif tipo_col == "date":
+                valor1 = parse_access_date(valor1_raw)
             else:
-                seleccionado = valor in seleccion_actual.selected_values
-            valores_vars[valor] = tk.BooleanVar(value=seleccionado)
+                valor1 = valor1_raw
+            if valor1 is None or valor1_raw == "":
+                return None
+            valor2 = None
+            if operador == "entre":
+                valor2_raw = value2_var.get().strip()
+                if tipo_col == "number":
+                    valor2 = _coerce_number(valor2_raw)
+                elif tipo_col == "date":
+                    valor2 = parse_access_date(valor2_raw)
+                else:
+                    valor2 = valor2_raw
+                if valor2 is None or valor2_raw == "":
+                    return None
+            return FilterState(selected_values=None, operator=operador, value1=valor1, value2=valor2)
+
+        def _valor_cumple_condicion(valor: str, filtro: FilterState) -> bool:
+            if valor == empty_filter_label:
+                if filtro.operator == "vacías":
+                    return True
+                if filtro.operator == "no vacías":
+                    return False
+                return False
+            if filtro.operator in {"vacías", "no vacías"}:
+                return filtro.operator == "no vacías"
+            tipo = column_types.get(col, "text")
+            if tipo == "text":
+                texto = str(valor).casefold()
+                needle = str(filtro.value1 or "").casefold()
+                if filtro.operator == "contiene":
+                    return needle in texto
+                if filtro.operator == "no contiene":
+                    return needle not in texto
+                if filtro.operator == "empieza por":
+                    return texto.startswith(needle)
+                if filtro.operator == "termina en":
+                    return texto.endswith(needle)
+                if filtro.operator == "igual a":
+                    return texto == needle
+                if filtro.operator == "distinto de":
+                    return texto != needle
+                return True
+            if tipo == "number":
+                numero = _coerce_number(valor)
+                if numero is None:
+                    return False
+                if filtro.operator == "=":
+                    return numero == filtro.value1
+                if filtro.operator == "≠":
+                    return numero != filtro.value1
+                if filtro.operator == ">":
+                    return numero > filtro.value1
+                if filtro.operator == "<":
+                    return numero < filtro.value1
+                if filtro.operator == "≥":
+                    return numero >= filtro.value1
+                if filtro.operator == "≤":
+                    return numero <= filtro.value1
+                if filtro.operator == "entre":
+                    if filtro.value1 is None or filtro.value2 is None:
+                        return False
+                    minimo, maximo = sorted((filtro.value1, filtro.value2))
+                    return minimo <= numero <= maximo
+                return True
+            if tipo == "date":
+                fecha = parse_access_date(valor)
+                if fecha is None:
+                    return False
+                hoy = dt.datetime.now().date()
+                if filtro.operator == "es":
+                    return fecha == filtro.value1
+                if filtro.operator == "antes de":
+                    return fecha < filtro.value1
+                if filtro.operator == "después de":
+                    return fecha > filtro.value1
+                if filtro.operator == "entre":
+                    if filtro.value1 is None or filtro.value2 is None:
+                        return False
+                    minimo, maximo = sorted((filtro.value1, filtro.value2))
+                    return minimo <= fecha <= maximo
+                if filtro.operator == "hoy":
+                    return fecha == hoy
+                if filtro.operator == "este mes":
+                    return fecha.year == hoy.year and fecha.month == hoy.month
+                return True
+            if tipo == "bool":
+                valor_bool = _coerce_bool(valor)
+                if valor_bool is None:
+                    return False
+                return valor_bool == filtro.value1
+            return True
 
         def _valores_filtrados():
             termino = busqueda_var.get().strip().lower()
+            valores_base = set(_valores_base(col))
+            if seleccion_actual and seleccion_actual.selected_values is not None:
+                valores_base.update(seleccion_actual.selected_values)
+            _asegurar_valores_vars(valores_base)
+            filtro = _filtro_local()
+            if filtro:
+                valores_base = {valor for valor in valores_base if _valor_cumple_condicion(valor, filtro)}
+            valores_ordenados = sorted(valores_base, key=lambda valor: _sort_key_for_value(valor, col))
             if not termino:
-                return valores_columna
-            return [valor for valor in valores_columna if termino in str(valor).lower()]
+                return valores_ordenados
+            return [valor for valor in valores_ordenados if termino in str(valor).lower()]
 
         def _actualizar_estado_seleccionar_todo():
             valores_visibles = _valores_filtrados()
@@ -1711,7 +1932,7 @@ def abrir_gestion_usuarios(db):
 
         def _seleccionar_resultados_busqueda():
             visibles = set(_valores_filtrados())
-            for valor in valores_columna:
+            for valor in valores_vars:
                 valores_vars[valor].set(valor in visibles)
             _actualizar_estado_seleccionar_todo()
 
@@ -1768,6 +1989,11 @@ def abrir_gestion_usuarios(db):
 
         lista_canvas.bind("<Configure>", _on_canvas_configure)
         busqueda_var.trace_add("write", lambda *_: _renderizar_lista())
+        modo_var.trace_add("write", lambda *_: _renderizar_lista())
+        operator_var.trace_add("write", lambda *_: _renderizar_lista())
+        value1_var.trace_add("write", lambda *_: _renderizar_lista())
+        value2_var.trace_add("write", lambda *_: _renderizar_lista())
+        bool_var.trace_add("write", lambda *_: _renderizar_lista())
         _renderizar_lista()
 
         botones = ttk.Frame(container)
