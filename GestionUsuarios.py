@@ -1312,7 +1312,13 @@ def abrir_gestion_usuarios(db):
                 texto += " ▲"
             elif orden_actual.get(c) == "desc":
                 texto += " ▼"
-            tree.heading(c, text=texto, command=lambda c=c: ordenar_columna(c))
+            color = "blue" if c in filtros_activos else ""
+            tree.heading(
+                c,
+                text=texto,
+                command=lambda c=c: ordenar_columna(c),
+                foreground=color,
+            )
 
     def ordenar_columna(col):
         datos = [(tree.set(iid, col), iid) for iid in tree.get_children()]
