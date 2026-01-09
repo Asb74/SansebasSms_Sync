@@ -749,7 +749,16 @@ def abrir_gestion_usuarios(db):
     datos_originales = []
     @dataclass(frozen=True)
     class FilterState:
-        selected_values: Set[str]
+        selected_values: Optional[Set[str]] = None
+        operator: Optional[str] = None
+        value1: Any = None
+        value2: Any = None
+
+        def __post_init__(self) -> None:
+            if self.selected_values is not None and self.operator is not None:
+                raise ValueError("FilterState no puede mezclar selected_values y operator.")
+            if self.selected_values is None and self.operator is None:
+                raise ValueError("FilterState debe definir selected_values u operator.")
 
     filtros_activos: Dict[str, FilterState] = {}
     column_types: Dict[str, str] = {}
@@ -1319,24 +1328,106 @@ def abrir_gestion_usuarios(db):
         _, display = _row_filter_values(row, col)
         return display
 
+    def row_matches_filter(row: dict, col: str, filtro: FilterState) -> bool:
+        raw, display = _row_filter_values(row, col)
+        valor_display = None if display == empty_filter_label else display
+        if filtro.operator is None:
+            if filtro.selected_values is None:
+                return True
+            return display in filtro.selected_values
+
+        operator = filtro.operator
+        if operator in {"vacías", "no vacías"}:
+            esta_vacio = valor_display is None
+            return esta_vacio if operator == "vacías" else not esta_vacio
+
+        tipo = column_types.get(col, "text")
+        if tipo == "text":
+            if valor_display is None:
+                return False
+            texto = str(valor_display).casefold()
+            needle = str(filtro.value1 or "").casefold()
+            if operator == "contiene":
+                return needle in texto
+            if operator == "no contiene":
+                return needle not in texto
+            if operator == "empieza por":
+                return texto.startswith(needle)
+            if operator == "termina en":
+                return texto.endswith(needle)
+            if operator == "igual a":
+                return texto == needle
+            if operator == "distinto de":
+                return texto != needle
+            return True
+
+        if tipo == "number":
+            numero = _coerce_number(raw)
+            if numero is None:
+                return False
+            valor1 = filtro.value1
+            valor2 = filtro.value2
+            if operator == "=":
+                return numero == valor1
+            if operator == "≠":
+                return numero != valor1
+            if operator == ">":
+                return numero > valor1
+            if operator == "<":
+                return numero < valor1
+            if operator == "≥":
+                return numero >= valor1
+            if operator == "≤":
+                return numero <= valor1
+            if operator == "entre":
+                if valor1 is None or valor2 is None:
+                    return False
+                minimo, maximo = sorted((valor1, valor2))
+                return minimo <= numero <= maximo
+            return True
+
+        if tipo == "date":
+            fecha = _coerce_date(raw, col)
+            if fecha is None:
+                return False
+            valor1 = filtro.value1
+            valor2 = filtro.value2
+            hoy = dt.datetime.now().date()
+            if operator == "es":
+                return fecha == valor1
+            if operator == "antes de":
+                return fecha < valor1
+            if operator == "después de":
+                return fecha > valor1
+            if operator == "entre":
+                if valor1 is None or valor2 is None:
+                    return False
+                minimo, maximo = sorted((valor1, valor2))
+                return minimo <= fecha <= maximo
+            if operator == "hoy":
+                return fecha == hoy
+            if operator == "este mes":
+                return fecha.year == hoy.year and fecha.month == hoy.month
+            return True
+
+        if tipo == "bool":
+            valor_bool = _coerce_bool(raw)
+            if valor_bool is None:
+                return False
+            return valor_bool == filtro.value1
+
+        return True
+
     def _row_matches_filters(row: dict, skip_col: str | None = None) -> bool:
         for col, estado in filtros_activos.items():
             if col == skip_col:
                 continue
-            if row_filter_value(row, col) not in estado.selected_values:
+            if not row_matches_filter(row, col, estado):
                 return False
         return True
 
     def _valores_base(col: str) -> set[str]:
         # Excel-like: recompute values from original data with all filters except this column.
-        if col == "Genero":
-            valores = {"Hombre", "Mujer", "Otro"}
-            if any(
-                row_filter_value(row, col) == empty_filter_label
-                for row in datos_originales
-            ):
-                valores.add(empty_filter_label)
-            return valores
         return {
             row_filter_value(row, col)
             for row in datos_originales
@@ -1346,7 +1437,7 @@ def abrir_gestion_usuarios(db):
     def _valores_unicos(col: str) -> list[str]:
         valores = _valores_base(col)
         seleccionados = filtros_activos.get(col)
-        if seleccionados:
+        if seleccionados and seleccionados.selected_values is not None:
             valores.update(seleccionados.selected_values)
         return sorted(valores, key=lambda valor: _sort_key_for_value(valor, col))
 
@@ -1430,10 +1521,149 @@ def abrir_gestion_usuarios(db):
 
         ttk.Separator(container, orient="horizontal").grid(row=2, column=0, sticky="ew", pady=(0, 8))
 
-        ttk.Label(container, text="Buscar:").grid(row=3, column=0, sticky="w")
+        tipo_col = column_types.get(col, "text")
+        estado_actual = filtros_activos.get(col)
+        modo_var = tk.StringVar(
+            value="condicion" if estado_actual and estado_actual.operator else "lista"
+        )
+
+        filtro_avanzado = ttk.LabelFrame(container, text="Filtro avanzado", padding=6)
+        filtro_avanzado.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        filtro_avanzado.grid_columnconfigure(1, weight=1)
+
+        ttk.Radiobutton(
+            filtro_avanzado,
+            text="Usar lista de valores",
+            variable=modo_var,
+            value="lista",
+        ).grid(row=0, column=0, sticky="w", columnspan=2)
+        ttk.Radiobutton(
+            filtro_avanzado,
+            text="Usar condición",
+            variable=modo_var,
+            value="condicion",
+        ).grid(row=1, column=0, sticky="w", columnspan=2)
+
+        operadores_por_tipo = {
+            "text": [
+                "contiene",
+                "no contiene",
+                "empieza por",
+                "termina en",
+                "igual a",
+                "distinto de",
+                "vacías",
+                "no vacías",
+            ],
+            "number": ["=", "≠", ">", "<", "≥", "≤", "entre", "vacías", "no vacías"],
+            "date": [
+                "es",
+                "antes de",
+                "después de",
+                "entre",
+                "hoy",
+                "este mes",
+                "vacías",
+                "no vacías",
+            ],
+        }
+
+        operator_var = tk.StringVar()
+        operator_combo: Optional[ttk.Combobox] = None
+        value1_var = tk.StringVar()
+        value2_var = tk.StringVar()
+        value1_entry: Optional[ttk.Entry] = None
+        value2_entry: Optional[ttk.Entry] = None
+        bool_var = tk.StringVar(value="True")
+
+        if tipo_col == "bool":
+            ttk.Label(filtro_avanzado, text="Valor:").grid(row=2, column=0, sticky="w")
+            bool_frame = ttk.Frame(filtro_avanzado)
+            bool_frame.grid(row=2, column=1, sticky="w")
+            ttk.Radiobutton(
+                bool_frame, text="True", variable=bool_var, value="True"
+            ).pack(side="left")
+            ttk.Radiobutton(
+                bool_frame, text="False", variable=bool_var, value="False"
+            ).pack(side="left", padx=(6, 0))
+        else:
+            ttk.Label(filtro_avanzado, text="Operador:").grid(row=2, column=0, sticky="w")
+            operator_combo = ttk.Combobox(
+                filtro_avanzado,
+                textvariable=operator_var,
+                values=operadores_por_tipo.get(tipo_col, operadores_por_tipo["text"]),
+                state="readonly",
+            )
+            operator_combo.grid(row=2, column=1, sticky="ew")
+
+            ttk.Label(filtro_avanzado, text="Valor:").grid(row=3, column=0, sticky="w")
+            value1_entry = ttk.Entry(filtro_avanzado, textvariable=value1_var)
+            value1_entry.grid(row=3, column=1, sticky="ew")
+
+            ttk.Label(filtro_avanzado, text="Hasta:").grid(row=4, column=0, sticky="w")
+            value2_entry = ttk.Entry(filtro_avanzado, textvariable=value2_var)
+            value2_entry.grid(row=4, column=1, sticky="ew")
+
+        def _formatear_valor_filtro(valor: Any) -> str:
+            if isinstance(valor, date):
+                return fmt_dmy(valor) or ""
+            return "" if valor is None else str(valor)
+
+        if estado_actual and estado_actual.operator:
+            if tipo_col == "bool":
+                bool_var.set("True" if estado_actual.value1 else "False")
+            else:
+                operator_var.set(estado_actual.operator)
+                if estado_actual.value1 is not None:
+                    value1_var.set(_formatear_valor_filtro(estado_actual.value1))
+                if estado_actual.value2 is not None:
+                    value2_var.set(_formatear_valor_filtro(estado_actual.value2))
+        else:
+            if operator_combo is not None:
+                operator_var.set(operadores_por_tipo.get(tipo_col, ["contiene"])[0])
+
+        def _actualizar_visibilidad_operador(*_):
+            modo_condicion = modo_var.get() == "condicion"
+            widgets = []
+            if operator_combo is not None:
+                widgets.append(operator_combo)
+            if value1_entry is not None:
+                widgets.append(value1_entry)
+            if value2_entry is not None:
+                widgets.append(value2_entry)
+            for widget in widgets:
+                widget.configure(state="normal" if modo_condicion else "disabled")
+            if tipo_col == "bool":
+                for child in filtro_avanzado.winfo_children():
+                    if isinstance(child, ttk.Frame):
+                        state = "normal" if modo_condicion else "disabled"
+                        for grand in child.winfo_children():
+                            grand.configure(state=state)
+
+            if not modo_condicion:
+                if value1_entry is not None:
+                    value1_entry.configure(state="disabled")
+                if value2_entry is not None:
+                    value2_entry.configure(state="disabled")
+                return
+
+            operator = operator_var.get()
+            if value1_entry is not None:
+                value1_entry.configure(
+                    state="normal" if operator not in {"vacías", "no vacías", "hoy", "este mes"} else "disabled"
+                )
+            if value2_entry is not None:
+                value2_entry.configure(state="normal" if operator == "entre" else "disabled")
+
+        if operator_combo is not None:
+            operator_combo.bind("<<ComboboxSelected>>", _actualizar_visibilidad_operador)
+        modo_var.trace_add("write", _actualizar_visibilidad_operador)
+        _actualizar_visibilidad_operador()
+
+        ttk.Label(container, text="Buscar:").grid(row=4, column=0, sticky="w")
         busqueda_var = tk.StringVar()
         entrada_busqueda = ttk.Entry(container, textvariable=busqueda_var)
-        entrada_busqueda.grid(row=4, column=0, sticky="ew", pady=(0, 6))
+        entrada_busqueda.grid(row=5, column=0, sticky="ew", pady=(0, 6))
 
         valores_columna = _valores_unicos(col)
         valores_vars: Dict[str, tk.BooleanVar] = {}
@@ -1441,11 +1671,10 @@ def abrir_gestion_usuarios(db):
         seleccionar_todo_var = tk.BooleanVar(value=False)
 
         for valor in valores_columna:
-            seleccionado = (
-                True
-                if seleccion_actual is None
-                else valor in seleccion_actual.selected_values
-            )
+            if seleccion_actual is None or seleccion_actual.selected_values is None:
+                seleccionado = True
+            else:
+                seleccionado = valor in seleccion_actual.selected_values
             valores_vars[valor] = tk.BooleanVar(value=seleccionado)
 
         def _valores_filtrados():
@@ -1478,16 +1707,16 @@ def abrir_gestion_usuarios(db):
             variable=seleccionar_todo_var,
             command=_toggle_seleccionar_todo,
         )
-        seleccionar_todo_cb.grid(row=5, column=0, sticky="w", pady=(0, 4))
+        seleccionar_todo_cb.grid(row=6, column=0, sticky="w", pady=(0, 4))
 
         ttk.Button(
             container,
             text="Seleccionar resultados de la búsqueda",
             command=_seleccionar_resultados_busqueda,
-        ).grid(row=6, column=0, sticky="w", pady=(0, 6))
+        ).grid(row=7, column=0, sticky="w", pady=(0, 6))
 
         lista_frame = ttk.Frame(container)
-        lista_frame.grid(row=7, column=0, sticky="nsew")
+        lista_frame.grid(row=8, column=0, sticky="nsew")
         lista_canvas = tk.Canvas(lista_frame, height=200, highlightthickness=0)
         scrollbar_vals = ttk.Scrollbar(lista_frame, orient="vertical", command=lista_canvas.yview)
         lista_canvas.configure(yscrollcommand=scrollbar_vals.set)
@@ -1528,11 +1757,57 @@ def abrir_gestion_usuarios(db):
         _renderizar_lista()
 
         botones = ttk.Frame(container)
-        botones.grid(row=8, column=0, sticky="e", pady=(8, 0))
+        botones.grid(row=9, column=0, sticky="e", pady=(8, 0))
 
         def _aceptar():
-            seleccionados = {val for val, var in valores_vars.items() if var.get()}
-            filtros_activos[col] = FilterState(selected_values=seleccionados)
+            if modo_var.get() == "condicion":
+                if tipo_col == "bool":
+                    filtro = FilterState(
+                        selected_values=None,
+                        operator="bool",
+                        value1=bool_var.get() == "True",
+                    )
+                    filtros_activos[col] = filtro
+                else:
+                    operador = operator_var.get()
+                    if not operador:
+                        messagebox.showwarning("Filtro", "Selecciona un operador válido.")
+                        return
+                    valor1: Any = None
+                    valor2: Any = None
+                    if operador not in {"vacías", "no vacías", "hoy", "este mes"}:
+                        valor1_raw = value1_var.get().strip()
+                        if tipo_col == "number":
+                            valor1 = _coerce_number(valor1_raw)
+                        elif tipo_col == "date":
+                            valor1 = parse_access_date(valor1_raw)
+                        else:
+                            valor1 = valor1_raw
+                        if valor1 is None or valor1_raw == "":
+                            messagebox.showwarning("Filtro", "Introduce un valor válido.")
+                            return
+                    if operador == "entre":
+                        valor2_raw = value2_var.get().strip()
+                        if tipo_col == "number":
+                            valor2 = _coerce_number(valor2_raw)
+                        elif tipo_col == "date":
+                            valor2 = parse_access_date(valor2_raw)
+                        else:
+                            valor2 = valor2_raw
+                        if valor2 is None or valor2_raw == "":
+                            messagebox.showwarning(
+                                "Filtro", "Introduce el segundo valor para el rango."
+                            )
+                            return
+                    filtros_activos[col] = FilterState(
+                        selected_values=None,
+                        operator=operador,
+                        value1=valor1,
+                        value2=valor2,
+                    )
+            else:
+                seleccionados = {val for val, var in valores_vars.items() if var.get()}
+                filtros_activos[col] = FilterState(selected_values=seleccionados)
             aplicar_filtros()
             _cerrar_popup_filtros()
 
