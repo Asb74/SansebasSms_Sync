@@ -735,7 +735,7 @@ def abrir_gestion_usuarios(db):
     }
 
     datos_originales = []
-    entradas_filtro = {}
+    filtros_activos: Dict[str, Set[str]] = {}
     rows_by_iid: Dict[str, Dict[str, str]] = {}
     upcoming_by_uid: Dict[str, List[date]] = defaultdict(list)
     cal_popup: Optional[tk.Toplevel] = None
@@ -965,56 +965,17 @@ def abrir_gestion_usuarios(db):
             dni_dialog_abierto = False
 
 
-    ventana.grid_rowconfigure(2, weight=1)
+    ventana.grid_rowconfigure(1, weight=1)
     ventana.grid_columnconfigure(0, weight=1)
 
     columnas_widths = {col: 110 for col in columnas}
     columnas_widths["Genero"] = 90
 
-    frame_filtros = tk.Frame(ventana)
-    frame_filtros.grid(row=0, column=0, sticky="ew")
-    frame_filtros.grid_columnconfigure(0, weight=1)
-
-    filtros_canvas = tk.Canvas(frame_filtros, highlightthickness=0, borderwidth=0)
-    filtros_canvas.grid(row=0, column=0, sticky="ew")
-
-    filtros_inner = tk.Frame(filtros_canvas)
-    frame_labels = tk.Frame(filtros_inner)
-    frame_labels.grid(row=0, column=0, sticky="ew")
-
-    frame_entries = tk.Frame(filtros_inner)
-    frame_entries.grid(row=1, column=0, sticky="ew")
-
-    filtros_window = filtros_canvas.create_window((0, 0), window=filtros_inner, anchor="nw")
-
-    for idx, col in enumerate(columnas):
-        head = encabezados.get(col, col)
-        width = columnas_widths.get(col, 110)
-        tk.Label(frame_labels, text=head).grid(row=0, column=idx, sticky="nsew")
-        entry = tk.Entry(frame_entries)
-        entry.grid(row=0, column=idx, sticky="nsew")
-        entradas_filtro[col] = entry
-        frame_labels.grid_columnconfigure(idx, minsize=width)
-        frame_entries.grid_columnconfigure(idx, minsize=width)
-
-    total_width = sum(columnas_widths.get(col, 110) for col in columnas)
-    filtros_inner.configure(width=total_width)
-    filtros_canvas.configure(scrollregion=(0, 0, total_width, 0))
-
-    def _actualizar_scrollregion(_event=None):
-        filtros_canvas.configure(scrollregion=filtros_canvas.bbox("all"))
-
-    def _ajustar_ancho_canvas(event):
-        filtros_canvas.itemconfigure(filtros_window, height=event.height)
-
-    filtros_inner.bind("<Configure>", _actualizar_scrollregion)
-    filtros_canvas.bind("<Configure>", _ajustar_ancho_canvas)
-
     frame_botones = tk.Frame(ventana)
-    frame_botones.grid(row=1, column=0, sticky="ew", pady=5)
+    frame_botones.grid(row=0, column=0, sticky="ew", pady=5)
 
     tabla_frame = tk.Frame(ventana)
-    tabla_frame.grid(row=2, column=0, sticky="nsew")
+    tabla_frame.grid(row=1, column=0, sticky="nsew")
     tabla_frame.grid_rowconfigure(0, weight=1)
     tabla_frame.grid_columnconfigure(0, weight=1)
 
@@ -1025,16 +986,11 @@ def abrir_gestion_usuarios(db):
     scrollbar_y = ttk.Scrollbar(tabla_frame, orient="vertical", command=tree.yview)
     scrollbar_y.grid(row=0, column=1, sticky="ns")
 
-    def _sync_xview(*args):
-        tree.xview(*args)
-        filtros_canvas.xview(*args)
-
-    scrollbar_x = ttk.Scrollbar(tabla_frame, orient="horizontal", command=_sync_xview)
+    scrollbar_x = ttk.Scrollbar(tabla_frame, orient="horizontal", command=tree.xview)
     scrollbar_x.grid(row=1, column=0, sticky="ew")
 
     def _on_tree_xscroll(first, last):
         scrollbar_x.set(first, last)
-        filtros_canvas.xview_moveto(first)
 
     tree.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=_on_tree_xscroll)
     tree.tag_configure("has_days_row", foreground="#b00020")
@@ -1042,7 +998,7 @@ def abrir_gestion_usuarios(db):
     tree.tag_configure("inactivo_7", foreground="#3b0066")
 
     frame_status = ttk.Frame(ventana)
-    frame_status.grid(row=3, column=0, sticky="ew")
+    frame_status.grid(row=2, column=0, sticky="ew")
     frame_status.grid_columnconfigure(0, weight=1)
     contador_var = tk.StringVar(value="Seleccionados para Mensaje: 0")
     ultima_act_var = tk.StringVar(value="")
@@ -1222,31 +1178,249 @@ def abrir_gestion_usuarios(db):
         altura = min(n_rows, max_rows_fit)
         tree.configure(height=altura)
 
+    def _convertir_valor_orden(valor):
+        try:
+            return float(valor)
+        except Exception:
+            try:
+                return dt.datetime.strptime(valor, "%d-%m-%Y")
+            except Exception:
+                return str(valor).lower()
+
+    def _actualizar_encabezados():
+        for c in columnas:
+            texto = encabezados.get(c, c)
+            if orden_actual.get(c) == "asc":
+                texto += " ▲"
+            elif orden_actual.get(c) == "desc":
+                texto += " ▼"
+            tree.heading(c, text=texto, command=lambda c=c: ordenar_columna(c))
+
     def ordenar_columna(col):
         datos = [(tree.set(iid, col), iid) for iid in tree.get_children()]
         reverse = orden_actual[col] == "asc"
-
-        def convertir(valor):
-            try:
-                return float(valor)
-            except:
-                try:
-                    return dt.datetime.strptime(valor, "%d-%m-%Y")
-                except:
-                    return valor.lower()
-
-        datos.sort(key=lambda x: convertir(x[0]), reverse=reverse)
+        datos.sort(key=lambda x: _convertir_valor_orden(x[0]), reverse=reverse)
         for idx, (val, iid) in enumerate(datos):
             tree.move(iid, '', idx)
 
-        orden_actual[col] = "desc" if reverse else "asc"
-
-        # Actualiza encabezados visualmente con la flecha
         for c in columnas:
-            texto = encabezados.get(c, c)
-            if c == col:
-                texto += " ▲" if not reverse else " ▼"
-            tree.heading(c, text=texto, command=lambda c=c: ordenar_columna(c))
+            if c != col:
+                orden_actual[c] = None
+        orden_actual[col] = "desc" if reverse else "asc"
+        _actualizar_encabezados()
+
+    def _row_value(row: dict, col: str) -> str:
+        valor = row.get(col, "")
+        if valor is None:
+            return ""
+        return str(valor)
+
+    def _row_matches_filters(row: dict, skip_col: str | None = None) -> bool:
+        for col, valores in filtros_activos.items():
+            if col == skip_col:
+                continue
+            if not valores:
+                return False
+            if _row_value(row, col) not in valores:
+                return False
+        return True
+
+    def _valores_unicos(col: str) -> list[str]:
+        valores = {
+            _row_value(row, col)
+            for row in datos_originales
+            if _row_matches_filters(row, skip_col=col)
+        }
+        seleccion_actual = filtros_activos.get(col, set())
+        valores.update(seleccion_actual)
+        return sorted(valores, key=_convertir_valor_orden)
+
+    def _aplicar_orden_actual():
+        col_orden = next((c for c, orden in orden_actual.items() if orden), None)
+        if not col_orden:
+            _actualizar_encabezados()
+            return
+        reverse = orden_actual[col_orden] == "desc"
+        datos = [(tree.set(iid, col_orden), iid) for iid in tree.get_children()]
+        datos.sort(key=lambda x: _convertir_valor_orden(x[0]), reverse=reverse)
+        for idx, (_val, iid) in enumerate(datos):
+            tree.move(iid, "", idx)
+        _actualizar_encabezados()
+
+    def aplicar_filtros():
+        _hide_cal_popup()
+        tree.delete(*tree.get_children())
+        rows_by_iid.clear()
+        for row in datos_originales:
+            if not _row_matches_filters(row):
+                continue
+            uid_row = row["UID"]
+            valores = row_to_values(row)
+            tags = _row_tags(uid_row, row)
+            tree.insert("", "end", iid=uid_row, values=valores, tags=tags)
+            rows_by_iid[uid_row] = row
+        _aplicar_orden_actual()
+        toggle_seleccionar_todos()
+        ajustar_altura_tree()
+
+    def limpiar_filtros():
+        filtros_activos.clear()
+        aplicar_filtros()
+
+    filtro_popup: Optional[tk.Toplevel] = None
+
+    def _cerrar_popup_filtros():
+        nonlocal filtro_popup
+        if filtro_popup and filtro_popup.winfo_exists():
+            filtro_popup.destroy()
+        filtro_popup = None
+
+    def _popup_position_for_column(col_id: str) -> tuple[int, int]:
+        bbox = tree.bbox("", column=col_id)
+        if not bbox and tree.get_children():
+            bbox = tree.bbox(tree.get_children()[0], column=col_id)
+        if not bbox:
+            return tree.winfo_rootx(), tree.winfo_rooty()
+        x, y, width, height = bbox
+        return tree.winfo_rootx() + x, tree.winfo_rooty() + y + height
+
+    def mostrar_filtro_columna(col: str):
+        nonlocal filtro_popup
+        _cerrar_popup_filtros()
+
+        popup = tk.Toplevel(ventana)
+        filtro_popup = popup
+        popup.title(f"Filtro - {encabezados.get(col, col)}")
+        popup.transient(ventana)
+        popup.resizable(False, False)
+        popup.attributes("-topmost", True)
+
+        col_id = f"#{columnas.index(col) + 1}"
+        x, y = _popup_position_for_column(col_id)
+        popup.geometry(f"+{x}+{y}")
+
+        container = ttk.Frame(popup, padding=8)
+        container.grid(row=0, column=0, sticky="nsew")
+        popup.grid_columnconfigure(0, weight=1)
+
+        ttk.Button(
+            container,
+            text="Ordenar de menor a mayor",
+            command=lambda: (ordenar_columna(col), _cerrar_popup_filtros()),
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Button(
+            container,
+            text="Ordenar de mayor a menor",
+            command=lambda: (ordenar_columna(col), _cerrar_popup_filtros()),
+        ).grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Separator(container, orient="horizontal").grid(row=2, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(container, text="Buscar:").grid(row=3, column=0, sticky="w")
+        busqueda_var = tk.StringVar()
+        entrada_busqueda = ttk.Entry(container, textvariable=busqueda_var)
+        entrada_busqueda.grid(row=4, column=0, sticky="ew", pady=(0, 6))
+
+        valores_columna = _valores_unicos(col)
+        valores_vars: Dict[str, tk.BooleanVar] = {}
+        seleccion_actual = filtros_activos.get(col, set())
+        seleccionar_todo_var = tk.BooleanVar(value=False)
+
+        for valor in valores_columna:
+            if seleccion_actual:
+                seleccionado = valor in seleccion_actual
+            else:
+                seleccionado = True
+            valores_vars[valor] = tk.BooleanVar(value=seleccionado)
+
+        def _actualizar_estado_seleccionar_todo():
+            if not valores_vars:
+                seleccionar_todo_var.set(True)
+                return
+            seleccionar_todo_var.set(all(var.get() for var in valores_vars.values()))
+
+        def _toggle_seleccionar_todo():
+            marcado = seleccionar_todo_var.get()
+            for var in valores_vars.values():
+                var.set(marcado)
+
+        seleccionar_todo_cb = ttk.Checkbutton(
+            container,
+            text="Seleccionar todo",
+            variable=seleccionar_todo_var,
+            command=_toggle_seleccionar_todo,
+        )
+        seleccionar_todo_cb.grid(row=5, column=0, sticky="w", pady=(0, 6))
+
+        lista_frame = ttk.Frame(container)
+        lista_frame.grid(row=6, column=0, sticky="nsew")
+        lista_canvas = tk.Canvas(lista_frame, height=200, highlightthickness=0)
+        scrollbar_vals = ttk.Scrollbar(lista_frame, orient="vertical", command=lista_canvas.yview)
+        lista_canvas.configure(yscrollcommand=scrollbar_vals.set)
+        scrollbar_vals.grid(row=0, column=1, sticky="ns")
+        lista_canvas.grid(row=0, column=0, sticky="nsew")
+        lista_frame.grid_rowconfigure(0, weight=1)
+        lista_frame.grid_columnconfigure(0, weight=1)
+
+        valores_inner = ttk.Frame(lista_canvas)
+        ventana_vals = lista_canvas.create_window((0, 0), window=valores_inner, anchor="nw")
+
+        def _actualizar_scrollregion(_event=None):
+            lista_canvas.configure(scrollregion=lista_canvas.bbox("all"))
+
+        valores_inner.bind("<Configure>", _actualizar_scrollregion)
+
+        def _renderizar_lista():
+            for child in valores_inner.winfo_children():
+                child.destroy()
+            termino = busqueda_var.get().strip().lower()
+            for valor in valores_columna:
+                if termino and termino not in str(valor).lower():
+                    continue
+                cb = ttk.Checkbutton(
+                    valores_inner,
+                    text=str(valor),
+                    variable=valores_vars[valor],
+                    command=_actualizar_estado_seleccionar_todo,
+                )
+                cb.pack(anchor="w")
+            _actualizar_estado_seleccionar_todo()
+            lista_canvas.update_idletasks()
+            lista_canvas.configure(scrollregion=lista_canvas.bbox("all"))
+            lista_canvas.itemconfigure(ventana_vals, width=lista_canvas.winfo_width())
+
+        def _on_canvas_configure(event):
+            lista_canvas.itemconfigure(ventana_vals, width=event.width)
+
+        lista_canvas.bind("<Configure>", _on_canvas_configure)
+        busqueda_var.trace_add("write", lambda *_: _renderizar_lista())
+        _renderizar_lista()
+
+        botones = ttk.Frame(container)
+        botones.grid(row=7, column=0, sticky="e", pady=(8, 0))
+
+        def _aceptar():
+            seleccionados = {val for val, var in valores_vars.items() if var.get()}
+            if seleccionados == set(valores_vars.keys()):
+                filtros_activos.pop(col, None)
+            else:
+                filtros_activos[col] = seleccionados
+            aplicar_filtros()
+            _cerrar_popup_filtros()
+
+        def _cancelar():
+            _cerrar_popup_filtros()
+
+        ttk.Button(botones, text="Aceptar", command=_aceptar).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(botones, text="Cancelar", command=_cancelar).grid(row=0, column=1)
+
+        def _cerrar_si_fuera():
+            if popup.winfo_exists() and popup.focus_displayof() is None:
+                _cerrar_popup_filtros()
+
+        popup.bind("<FocusOut>", lambda _e: popup.after(50, _cerrar_si_fuera))
+        popup.bind("<Escape>", lambda _e: _cerrar_popup_filtros())
+        entrada_busqueda.focus_set()
 
 
     for col in columnas:
@@ -1258,6 +1432,22 @@ def abrir_gestion_usuarios(db):
         tree.heading("Genero", text="Género", command=lambda c="Genero": ordenar_columna(c))
         tree.column("Genero", width=columnas_widths.get("Genero", 90), anchor="center")
 
+    def _on_heading_right_click(event):
+        region = tree.identify("region", event.x, event.y)
+        if region != "heading":
+            return
+        col_id = tree.identify_column(event.x)
+        if not col_id:
+            return
+        try:
+            col_index = int(col_id.replace("#", "")) - 1
+        except ValueError:
+            return
+        if 0 <= col_index < len(columnas):
+            mostrar_filtro_columna(columnas[col_index])
+
+    tree.bind("<Button-3>", _on_heading_right_click)
+
     seleccionar_todos_var = tk.BooleanVar(value=False)
 
     def toggle_seleccionar_todos():
@@ -1266,31 +1456,6 @@ def abrir_gestion_usuarios(db):
         else:
             tree.selection_remove(tree.get_children())
         actualizar_contador()
-
-    def aplicar_filtros():
-        _hide_cal_popup()
-        tree.delete(*tree.get_children())
-        criterios = {col: entradas_filtro[col].get().strip().lower() for col in columnas}
-        for row in datos_originales:
-            visible = True
-            for col in columnas:
-                valor = str(row.get(col, "")).lower().strip()
-                if criterios[col] and criterios[col] not in valor:
-                    visible = False
-                    break
-            if visible:
-                uid_row = row["UID"]
-                valores = row_to_values(row)
-                tags = _row_tags(uid_row, row)
-                tree.insert("", "end", iid=uid_row, values=valores, tags=tags)
-                rows_by_iid[uid_row] = row
-        toggle_seleccionar_todos()
-        ajustar_altura_tree()
-
-    def limpiar_filtros():
-        for entry in entradas_filtro.values():
-            entry.delete(0, tk.END)
-        aplicar_filtros()
 
     def guardar_dato(uid, campo, valor):
         try:
@@ -1699,7 +1864,7 @@ def abrir_gestion_usuarios(db):
         try:
             _hide_cal_popup()
 
-            hay_filtros = any(entradas_filtro[c].get().strip() for c in columnas)
+            hay_filtros = bool(filtros_activos)
 
             y0 = tree.yview()
 
@@ -1724,8 +1889,7 @@ def abrir_gestion_usuarios(db):
     btn_actualizar = tk.Button(frame_botones, text="🔄 Actualizar", command=refrescar)
     btn_actualizar.pack(side="left", padx=10)
 
-    tk.Button(frame_botones, text="🔍 Filtrar", command=aplicar_filtros).pack(side="left", padx=10)
-    tk.Button(frame_botones, text="🧹 Limpiar", command=limpiar_filtros).pack(side="left", padx=10)
+    tk.Button(frame_botones, text="🧹 Limpiar filtros", command=limpiar_filtros).pack(side="left", padx=10)
     tk.Checkbutton(frame_botones, text="Seleccionar Todos", variable=seleccionar_todos_var, command=toggle_seleccionar_todos).pack(side="left", padx=10)
     tk.Button(frame_botones, text="Mensaje", command=toggle_mensaje).pack(side="left", padx=10)
     tk.Button(frame_botones, text="🗑 Eliminar seleccionado", bg="salmon", command=eliminar_usuario).pack(side="left", padx=10)
