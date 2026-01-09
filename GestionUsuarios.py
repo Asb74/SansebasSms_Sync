@@ -1029,8 +1029,10 @@ def abrir_gestion_usuarios(db):
     frame_status.grid_columnconfigure(0, weight=1)
     contador_var = tk.StringVar(value="Seleccionados para Mensaje: 0")
     ultima_act_var = tk.StringVar(value="")
+    resultados_var = tk.StringVar(value="")
     ttk.Label(frame_status, textvariable=ultima_act_var).grid(row=0, column=0, sticky="w", padx=10)
     ttk.Label(frame_status, textvariable=contador_var).grid(row=0, column=1, sticky="e", padx=10, pady=5)
+    ttk.Label(frame_status, textvariable=resultados_var).grid(row=0, column=2, sticky="e", padx=10, pady=5)
 
     COL_INDEX = {name: i for i, name in enumerate(tree["columns"])}
     nombre_col_index = COL_INDEX.get("Nombre", 1)
@@ -1075,6 +1077,11 @@ def abrir_gestion_usuarios(db):
         if isinstance(value, (int, float)) and col in date_columns:
             return parse_access_date(value)
         return None
+
+    def actualizar_contador_resultados():
+        total = len(datos_originales)
+        visibles = len(tree.get_children())
+        resultados_var.set(f"Encontrados {visibles} registros de {total}")
 
     def _row_filter_values(row: dict, col: str) -> tuple[Any, str]:
         # Critical: filters operate on display value, but we keep raw for type detection.
@@ -1479,10 +1486,12 @@ def abrir_gestion_usuarios(db):
         _aplicar_orden_actual()
         toggle_seleccionar_todos()
         ajustar_altura_tree()
+        actualizar_contador_resultados()
 
     def limpiar_filtros():
         filtros_activos.clear()
         aplicar_filtros()
+        actualizar_contador_resultados()
 
     filtro_popup: Optional[tk.Toplevel] = None
 
@@ -2387,6 +2396,7 @@ def abrir_gestion_usuarios(db):
         _actualizar_tipos_columnas()
         ajustar_altura_tree()
         actualizar_contador()
+        actualizar_contador_resultados()
 
         print(
             f"⏱️ t0→t1 Firebase {t1 - t0:.2f}s | t1→t2 TRAB {t2 - t1:.2f}s | "
