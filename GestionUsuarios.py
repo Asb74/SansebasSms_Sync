@@ -1311,16 +1311,16 @@ def abrir_gestion_usuarios(db):
     def _actualizar_encabezados():
         for c in columnas:
             texto = encabezados.get(c, c)
+            if c in filtros_activos:
+                texto = f"■ {texto}"
             if orden_actual.get(c) == "asc":
                 texto += " ▲"
             elif orden_actual.get(c) == "desc":
                 texto += " ▼"
-            estilo = "Filtered.Treeview.Heading" if c in filtros_activos else "Normal.Treeview.Heading"
             tree.heading(
                 c,
                 text=texto,
                 command=lambda c=c: ordenar_columna(c),
-                style=estilo,
             )
 
     def ordenar_columna(col):
