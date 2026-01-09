@@ -1287,6 +1287,9 @@ def abrir_gestion_usuarios(db):
     _notify_reset_cb = __apply_reset_in_ui
 
     style = ttk.Style()
+    normal_heading_fg = style.lookup("Treeview.Heading", "foreground")
+    style.configure("Normal.Treeview.Heading", foreground=normal_heading_fg or "")
+    style.configure("Filtered.Treeview.Heading", foreground="#555555")
 
     def _row_height():
         h = style.lookup("Treeview", "rowheight")
@@ -1312,12 +1315,12 @@ def abrir_gestion_usuarios(db):
                 texto += " ▲"
             elif orden_actual.get(c) == "desc":
                 texto += " ▼"
-            color = "blue" if c in filtros_activos else ""
+            estilo = "Filtered.Treeview.Heading" if c in filtros_activos else "Normal.Treeview.Heading"
             tree.heading(
                 c,
                 text=texto,
                 command=lambda c=c: ordenar_columna(c),
-                foreground=color,
+                style=estilo,
             )
 
     def ordenar_columna(col):
@@ -1998,6 +2001,18 @@ def abrir_gestion_usuarios(db):
         botones = ttk.Frame(container)
         botones.grid(row=9, column=0, sticky="e", pady=(8, 0))
 
+        cerrando_popup = False
+
+        def _cerrar_popup_seguro():
+            nonlocal cerrando_popup, filtro_popup
+            if cerrando_popup:
+                return
+            cerrando_popup = True
+            if popup.winfo_exists():
+                popup.destroy()
+            if filtro_popup is popup:
+                filtro_popup = None
+
         def _aceptar():
             seleccionados = {val for val, var in valores_vars.items() if var.get()}
             filtro_condicion = _filtro_local()
@@ -2013,21 +2028,23 @@ def abrir_gestion_usuarios(db):
                 )
             else:
                 _set_active_filter(col, FilterState(selected_values=seleccionados))
-            aplicar_filtros()
-            _cerrar_popup_filtros()
+            try:
+                aplicar_filtros()
+            finally:
+                _cerrar_popup_seguro()
 
         def _cancelar():
-            _cerrar_popup_filtros()
+            _cerrar_popup_seguro()
 
         ttk.Button(botones, text="Aceptar", command=_aceptar).grid(row=0, column=0, padx=(0, 6))
         ttk.Button(botones, text="Cancelar", command=_cancelar).grid(row=0, column=1)
 
         def _cerrar_si_fuera():
             if popup.winfo_exists() and popup.focus_displayof() is None:
-                _cerrar_popup_filtros()
+                _cerrar_popup_seguro()
 
         popup.bind("<FocusOut>", lambda _e: popup.after(50, _cerrar_si_fuera))
-        popup.bind("<Escape>", lambda _e: _cerrar_popup_filtros())
+        popup.bind("<Escape>", lambda _e: _cerrar_popup_seguro())
         entrada_busqueda.focus_set()
 
 
