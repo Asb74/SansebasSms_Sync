@@ -755,8 +755,6 @@ def abrir_gestion_usuarios(db):
         value2: Any = None
 
         def __post_init__(self) -> None:
-            if self.selected_values is not None and self.operator is not None:
-                raise ValueError("FilterState no puede mezclar selected_values y operator.")
             if self.selected_values is None and self.operator is None:
                 raise ValueError("FilterState debe definir selected_values u operator.")
 
@@ -1336,90 +1334,85 @@ def abrir_gestion_usuarios(db):
     def row_matches_filter(row: dict, col: str, filtro: FilterState) -> bool:
         raw, display = _row_filter_values(row, col)
         valor_display = None if display == empty_filter_label else display
-        if filtro.operator is None:
-            if filtro.selected_values is None:
-                return True
-            return display in filtro.selected_values
-
-        operator = filtro.operator
-        if operator in {"vacías", "no vacías"}:
-            esta_vacio = valor_display is None
-            return esta_vacio if operator == "vacías" else not esta_vacio
-
-        tipo = column_types.get(col, "text")
-        if tipo == "text":
-            if valor_display is None:
-                return False
-            texto = str(valor_display).casefold()
-            needle = str(filtro.value1 or "").casefold()
-            if operator == "contiene":
-                return needle in texto
-            if operator == "no contiene":
-                return needle not in texto
-            if operator == "empieza por":
-                return texto.startswith(needle)
-            if operator == "termina en":
-                return texto.endswith(needle)
-            if operator == "igual a":
-                return texto == needle
-            if operator == "distinto de":
-                return texto != needle
-            return True
-
-        if tipo == "number":
-            numero = _coerce_number(raw)
-            if numero is None:
-                return False
-            valor1 = filtro.value1
-            valor2 = filtro.value2
-            if operator == "=":
-                return numero == valor1
-            if operator == "≠":
-                return numero != valor1
-            if operator == ">":
-                return numero > valor1
-            if operator == "<":
-                return numero < valor1
-            if operator == "≥":
-                return numero >= valor1
-            if operator == "≤":
-                return numero <= valor1
-            if operator == "entre":
-                if valor1 is None or valor2 is None:
+        if filtro.operator is not None:
+            operator = filtro.operator
+            if operator in {"vacías", "no vacías"}:
+                esta_vacio = valor_display is None
+                if esta_vacio != (operator == "vacías"):
                     return False
-                minimo, maximo = sorted((valor1, valor2))
-                return minimo <= numero <= maximo
-            return True
+            else:
+                tipo = column_types.get(col, "text")
+                if tipo == "text":
+                    if valor_display is None:
+                        return False
+                    texto = str(valor_display).casefold()
+                    needle = str(filtro.value1 or "").casefold()
+                    if operator == "contiene" and needle not in texto:
+                        return False
+                    if operator == "no contiene" and needle in texto:
+                        return False
+                    if operator == "empieza por" and not texto.startswith(needle):
+                        return False
+                    if operator == "termina en" and not texto.endswith(needle):
+                        return False
+                    if operator == "igual a" and texto != needle:
+                        return False
+                    if operator == "distinto de" and texto == needle:
+                        return False
+                elif tipo == "number":
+                    numero = _coerce_number(raw)
+                    if numero is None:
+                        return False
+                    valor1 = filtro.value1
+                    valor2 = filtro.value2
+                    if operator == "=" and numero != valor1:
+                        return False
+                    if operator == "≠" and numero == valor1:
+                        return False
+                    if operator == ">" and numero <= valor1:
+                        return False
+                    if operator == "<" and numero >= valor1:
+                        return False
+                    if operator == "≥" and numero < valor1:
+                        return False
+                    if operator == "≤" and numero > valor1:
+                        return False
+                    if operator == "entre":
+                        if valor1 is None or valor2 is None:
+                            return False
+                        minimo, maximo = sorted((valor1, valor2))
+                        if not minimo <= numero <= maximo:
+                            return False
+                elif tipo == "date":
+                    fecha = _coerce_date(raw, col)
+                    if fecha is None:
+                        return False
+                    valor1 = filtro.value1
+                    valor2 = filtro.value2
+                    hoy = dt.datetime.now().date()
+                    if operator == "es" and fecha != valor1:
+                        return False
+                    if operator == "antes de" and fecha >= valor1:
+                        return False
+                    if operator == "después de" and fecha <= valor1:
+                        return False
+                    if operator == "entre":
+                        if valor1 is None or valor2 is None:
+                            return False
+                        minimo, maximo = sorted((valor1, valor2))
+                        if not minimo <= fecha <= maximo:
+                            return False
+                    if operator == "hoy" and fecha != hoy:
+                        return False
+                    if operator == "este mes" and not (fecha.year == hoy.year and fecha.month == hoy.month):
+                        return False
+                elif tipo == "bool":
+                    valor_bool = _coerce_bool(raw)
+                    if valor_bool is None or valor_bool != filtro.value1:
+                        return False
 
-        if tipo == "date":
-            fecha = _coerce_date(raw, col)
-            if fecha is None:
-                return False
-            valor1 = filtro.value1
-            valor2 = filtro.value2
-            hoy = dt.datetime.now().date()
-            if operator == "es":
-                return fecha == valor1
-            if operator == "antes de":
-                return fecha < valor1
-            if operator == "después de":
-                return fecha > valor1
-            if operator == "entre":
-                if valor1 is None or valor2 is None:
-                    return False
-                minimo, maximo = sorted((valor1, valor2))
-                return minimo <= fecha <= maximo
-            if operator == "hoy":
-                return fecha == hoy
-            if operator == "este mes":
-                return fecha.year == hoy.year and fecha.month == hoy.month
-            return True
-
-        if tipo == "bool":
-            valor_bool = _coerce_bool(raw)
-            if valor_bool is None:
-                return False
-            return valor_bool == filtro.value1
+        if filtro.selected_values is not None and display not in filtro.selected_values:
+            return False
 
         return True
 
@@ -2001,7 +1994,19 @@ def abrir_gestion_usuarios(db):
 
         def _aceptar():
             seleccionados = {val for val, var in valores_vars.items() if var.get()}
-            _set_active_filter(col, FilterState(selected_values=seleccionados))
+            filtro_condicion = _filtro_local()
+            if filtro_condicion:
+                _set_active_filter(
+                    col,
+                    FilterState(
+                        selected_values=seleccionados,
+                        operator=filtro_condicion.operator,
+                        value1=filtro_condicion.value1,
+                        value2=filtro_condicion.value2,
+                    ),
+                )
+            else:
+                _set_active_filter(col, FilterState(selected_values=seleccionados))
             aplicar_filtros()
             _cerrar_popup_filtros()
 
