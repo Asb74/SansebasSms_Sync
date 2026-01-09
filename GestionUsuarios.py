@@ -1431,6 +1431,10 @@ def abrir_gestion_usuarios(db):
                 return False
         return True
 
+    def _set_active_filter(col: str, filtro: FilterState) -> None:
+        filtros_activos.pop(col, None)
+        filtros_activos[col] = filtro
+
     def _valores_base(col: str) -> set[str]:
         # Excel-like: recompute values from original data with all filters except this column.
         return {
@@ -1777,7 +1781,7 @@ def abrir_gestion_usuarios(db):
                         operator="bool",
                         value1=bool_var.get() == "True",
                     )
-                    filtros_activos[col] = filtro
+                    _set_active_filter(col, filtro)
                 else:
                     operador = operator_var.get()
                     if not operador:
@@ -1809,15 +1813,18 @@ def abrir_gestion_usuarios(db):
                                 "Filtro", "Introduce el segundo valor para el rango."
                             )
                             return
-                    filtros_activos[col] = FilterState(
-                        selected_values=None,
-                        operator=operador,
-                        value1=valor1,
-                        value2=valor2,
+                    _set_active_filter(
+                        col,
+                        FilterState(
+                            selected_values=None,
+                            operator=operador,
+                            value1=valor1,
+                            value2=valor2,
+                        ),
                     )
             else:
                 seleccionados = {val for val, var in valores_vars.items() if var.get()}
-                filtros_activos[col] = FilterState(selected_values=seleccionados)
+                _set_active_filter(col, FilterState(selected_values=seleccionados))
             aplicar_filtros()
             _cerrar_popup_filtros()
 
