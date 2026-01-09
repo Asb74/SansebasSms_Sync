@@ -735,7 +735,7 @@ def abrir_gestion_usuarios(db):
     }
 
     datos_originales = []
-    filtros_activos: Dict[str, Set[str]] = {}
+    filtros_activos: Dict[str, Dict[str, Any]] = {}
     rows_by_iid: Dict[str, Dict[str, str]] = {}
     upcoming_by_uid: Dict[str, List[date]] = defaultdict(list)
     cal_popup: Optional[tk.Toplevel] = None
@@ -1187,6 +1187,8 @@ def abrir_gestion_usuarios(db):
             except Exception:
                 return str(valor).lower()
 
+    VACIAS_LABEL = "(Vacías)"
+
     def _actualizar_encabezados():
         for c in columnas:
             texto = encabezados.get(c, c)
@@ -1209,29 +1211,187 @@ def abrir_gestion_usuarios(db):
         orden_actual[col] = "desc" if reverse else "asc"
         _actualizar_encabezados()
 
-    def _row_value(row: dict, col: str) -> str:
+    def _row_display_value(row: dict, col: str) -> str:
         valor = row.get(col, "")
-        if valor is None:
-            return ""
+        if valor is None or str(valor) == "":
+            return VACIAS_LABEL
+        if col == "Nombre":
+            return str(valor)
         return str(valor)
 
+    def _normalize_filter_state(state: dict | None) -> dict:
+        if not state:
+            return {"selected": None, "advanced": None}
+        selected = state.get("selected")
+        if selected is not None and not isinstance(selected, set):
+            selected = set(selected)
+        return {
+            "selected": selected,
+            "advanced": state.get("advanced"),
+        }
+
+    def _migrar_filtros_activos():
+        for col, state in list(filtros_activos.items()):
+            if isinstance(state, set):
+                filtros_activos[col] = {"selected": set(state) or None, "advanced": None}
+
+    def _is_empty_value(value: Any) -> bool:
+        return value is None or str(value).strip() == ""
+
+    def _parse_number(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(str(value).replace(",", ".").strip())
+        except Exception:
+            return None
+
+    def _parse_date_value(value: Any) -> date | None:
+        if value is None:
+            return None
+        if isinstance(value, dt.datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        return parse_access_date(value)
+
+    def _matches_advanced(raw_value: Any, advanced: dict) -> bool:
+        if not advanced:
+            return True
+        tipo = str(advanced.get("type") or advanced.get("tipo") or "").strip().lower()
+        op = str(
+            advanced.get("op")
+            or advanced.get("operator")
+            or advanced.get("condicion")
+            or advanced.get("modo")
+            or ""
+        ).strip().lower()
+        value = advanced.get("value", advanced.get("valor"))
+        value2 = advanced.get(
+            "value2",
+            advanced.get(
+                "valor2",
+                advanced.get("hasta", advanced.get("to")),
+            ),
+        )
+
+        if tipo in ("texto", "text", "string"):
+            base = "" if raw_value is None else str(raw_value)
+            if op in ("vacio", "vacío", "empty", "is_empty"):
+                return _is_empty_value(raw_value)
+            if op in ("no_vacio", "no vacío", "not_empty"):
+                return not _is_empty_value(raw_value)
+            if value is None:
+                return True
+            objetivo = str(value)
+            base_lower = base.lower()
+            objetivo_lower = objetivo.lower()
+            if op in ("igual", "equals", "eq", "="):
+                return base_lower == objetivo_lower
+            if op in ("no_igual", "not_equals", "neq", "!="):
+                return base_lower != objetivo_lower
+            if op in ("empieza", "starts_with", "startswith"):
+                return base_lower.startswith(objetivo_lower)
+            if op in ("termina", "ends_with", "endswith"):
+                return base_lower.endswith(objetivo_lower)
+            if op in ("no_contiene", "not_contains"):
+                return objetivo_lower not in base_lower
+            return objetivo_lower in base_lower
+
+        if tipo in ("numero", "número", "number"):
+            numero = _parse_number(raw_value)
+            if op in ("vacio", "vacío", "empty", "is_empty"):
+                return _is_empty_value(raw_value)
+            if op in ("no_vacio", "no vacío", "not_empty"):
+                return not _is_empty_value(raw_value)
+            if numero is None:
+                return False
+            valor_num = _parse_number(value)
+            valor_num2 = _parse_number(value2)
+            if op in ("between", "entre"):
+                if valor_num is None or valor_num2 is None:
+                    return False
+                return valor_num <= numero <= valor_num2
+            if valor_num is None:
+                return True
+            if op in ("gt", ">", "mayor"):
+                return numero > valor_num
+            if op in ("gte", ">=", "mayor_igual"):
+                return numero >= valor_num
+            if op in ("lt", "<", "menor"):
+                return numero < valor_num
+            if op in ("lte", "<=", "menor_igual"):
+                return numero <= valor_num
+            if op in ("ne", "!=", "no_igual"):
+                return numero != valor_num
+            return numero == valor_num
+
+        if tipo in ("fecha", "date"):
+            fecha = _parse_date_value(raw_value)
+            if op in ("vacio", "vacío", "empty", "is_empty"):
+                return _is_empty_value(raw_value)
+            if op in ("no_vacio", "no vacío", "not_empty"):
+                return not _is_empty_value(raw_value)
+            if fecha is None:
+                return False
+            fecha_obj = _parse_date_value(value)
+            fecha_obj2 = _parse_date_value(value2)
+            if op in ("between", "entre"):
+                if fecha_obj is None or fecha_obj2 is None:
+                    return False
+                return fecha_obj <= fecha <= fecha_obj2
+            if fecha_obj is None:
+                return True
+            if op in ("gt", ">", "despues", "después", "after"):
+                return fecha > fecha_obj
+            if op in ("gte", ">=", "desde", "after_or_equal"):
+                return fecha >= fecha_obj
+            if op in ("lt", "<", "antes", "before"):
+                return fecha < fecha_obj
+            if op in ("lte", "<=", "hasta", "before_or_equal"):
+                return fecha <= fecha_obj
+            if op in ("ne", "!=", "no_igual"):
+                return fecha != fecha_obj
+            return fecha == fecha_obj
+
+        if tipo in ("booleano", "bool", "boolean"):
+            valor_bool = _is_true(raw_value)
+            if isinstance(value, bool):
+                return valor_bool is value
+            if value is not None:
+                return valor_bool is _is_true(value)
+            if op in ("true", "verdadero", "si", "sí"):
+                return valor_bool is True
+            if op in ("false", "falso", "no"):
+                return valor_bool is False
+            return valor_bool is True
+
+        return True
+
     def _row_matches_filters(row: dict, skip_col: str | None = None) -> bool:
-        for col, valores in filtros_activos.items():
+        for col, estado in filtros_activos.items():
             if col == skip_col:
                 continue
-            if not valores:
+            estado_normalizado = _normalize_filter_state(estado)
+            seleccionados = estado_normalizado.get("selected")
+            avanzado = estado_normalizado.get("advanced")
+            if avanzado and not _matches_advanced(row.get(col), avanzado):
                 return False
-            if _row_value(row, col) not in valores:
-                return False
+            if seleccionados is not None:
+                if not seleccionados:
+                    return False
+                if _row_display_value(row, col) not in seleccionados:
+                    return False
         return True
 
     def _valores_unicos(col: str) -> list[str]:
         valores = {
-            _row_value(row, col)
+            _row_display_value(row, col)
             for row in datos_originales
             if _row_matches_filters(row, skip_col=col)
         }
-        seleccion_actual = filtros_activos.get(col, set())
+        estado = _normalize_filter_state(filtros_activos.get(col))
+        seleccion_actual = estado.get("selected") or set()
         valores.update(seleccion_actual)
         return sorted(valores, key=_convertir_valor_orden)
 
@@ -1249,6 +1409,7 @@ def abrir_gestion_usuarios(db):
 
     def aplicar_filtros():
         _hide_cal_popup()
+        _migrar_filtros_activos()
         tree.delete(*tree.get_children())
         rows_by_iid.clear()
         for row in datos_originales:
@@ -1323,14 +1484,17 @@ def abrir_gestion_usuarios(db):
 
         valores_columna = _valores_unicos(col)
         valores_vars: Dict[str, tk.BooleanVar] = {}
-        seleccion_actual = filtros_activos.get(col, set())
+        estado = _normalize_filter_state(filtros_activos.get(col))
+        seleccion_actual = estado.get("selected")
         seleccionar_todo_var = tk.BooleanVar(value=False)
 
         for valor in valores_columna:
-            if seleccion_actual:
+            if seleccion_actual is None:
+                seleccionado = True
+            elif seleccion_actual:
                 seleccionado = valor in seleccion_actual
             else:
-                seleccionado = True
+                seleccionado = False
             valores_vars[valor] = tk.BooleanVar(value=seleccionado)
 
         def _actualizar_estado_seleccionar_todo():
@@ -1352,8 +1516,22 @@ def abrir_gestion_usuarios(db):
         )
         seleccionar_todo_cb.grid(row=5, column=0, sticky="w", pady=(0, 6))
 
+        def _seleccionar_busqueda():
+            termino = busqueda_var.get().strip().lower()
+            for valor in valores_columna:
+                if termino and termino not in str(valor).lower():
+                    continue
+                valores_vars[valor].set(True)
+            _actualizar_estado_seleccionar_todo()
+
+        ttk.Button(
+            container,
+            text="Seleccionar búsqueda",
+            command=_seleccionar_busqueda,
+        ).grid(row=6, column=0, sticky="w", pady=(0, 6))
+
         lista_frame = ttk.Frame(container)
-        lista_frame.grid(row=6, column=0, sticky="nsew")
+        lista_frame.grid(row=7, column=0, sticky="nsew")
         lista_canvas = tk.Canvas(lista_frame, height=200, highlightthickness=0)
         scrollbar_vals = ttk.Scrollbar(lista_frame, orient="vertical", command=lista_canvas.yview)
         lista_canvas.configure(yscrollcommand=scrollbar_vals.set)
@@ -1397,14 +1575,21 @@ def abrir_gestion_usuarios(db):
         _renderizar_lista()
 
         botones = ttk.Frame(container)
-        botones.grid(row=7, column=0, sticky="e", pady=(8, 0))
+        botones.grid(row=8, column=0, sticky="e", pady=(8, 0))
 
         def _aceptar():
             seleccionados = {val for val, var in valores_vars.items() if var.get()}
             if seleccionados == set(valores_vars.keys()):
+                seleccionados = None
+            estado_actual = _normalize_filter_state(filtros_activos.get(col))
+            nuevo_estado = {
+                "selected": seleccionados,
+                "advanced": estado_actual.get("advanced"),
+            }
+            if nuevo_estado["selected"] is None and not nuevo_estado["advanced"]:
                 filtros_activos.pop(col, None)
             else:
-                filtros_activos[col] = seleccionados
+                filtros_activos[col] = nuevo_estado
             aplicar_filtros()
             _cerrar_popup_filtros()
 
