@@ -968,23 +968,47 @@ def abrir_gestion_usuarios(db):
     ventana.grid_rowconfigure(2, weight=1)
     ventana.grid_columnconfigure(0, weight=1)
 
+    columnas_widths = {col: 110 for col in columnas}
+    columnas_widths["Genero"] = 90
+
     frame_filtros = tk.Frame(ventana)
     frame_filtros.grid(row=0, column=0, sticky="ew")
+    frame_filtros.grid_columnconfigure(0, weight=1)
 
-    frame_labels = tk.Frame(frame_filtros)
-    frame_labels.pack(fill="x")
+    filtros_canvas = tk.Canvas(frame_filtros, highlightthickness=0, borderwidth=0)
+    filtros_canvas.grid(row=0, column=0, sticky="ew")
 
-    frame_entries = tk.Frame(frame_filtros)
-    frame_entries.pack(fill="x")
+    filtros_inner = tk.Frame(filtros_canvas)
+    frame_labels = tk.Frame(filtros_inner)
+    frame_labels.grid(row=0, column=0, sticky="ew")
+
+    frame_entries = tk.Frame(filtros_inner)
+    frame_entries.grid(row=1, column=0, sticky="ew")
+
+    filtros_window = filtros_canvas.create_window((0, 0), window=filtros_inner, anchor="nw")
 
     for idx, col in enumerate(columnas):
         head = encabezados.get(col, col)
-        tk.Label(frame_labels, text=head).grid(row=0, column=idx, sticky="ew")
+        width = columnas_widths.get(col, 110)
+        tk.Label(frame_labels, text=head).grid(row=0, column=idx, sticky="nsew")
         entry = tk.Entry(frame_entries)
-        entry.grid(row=0, column=idx, sticky="ew")
+        entry.grid(row=0, column=idx, sticky="nsew")
         entradas_filtro[col] = entry
-        frame_labels.grid_columnconfigure(idx, weight=1)
-        frame_entries.grid_columnconfigure(idx, weight=1)
+        frame_labels.grid_columnconfigure(idx, minsize=width)
+        frame_entries.grid_columnconfigure(idx, minsize=width)
+
+    total_width = sum(columnas_widths.get(col, 110) for col in columnas)
+    filtros_inner.configure(width=total_width)
+    filtros_canvas.configure(scrollregion=(0, 0, total_width, 0))
+
+    def _actualizar_scrollregion(_event=None):
+        filtros_canvas.configure(scrollregion=filtros_canvas.bbox("all"))
+
+    def _ajustar_ancho_canvas(event):
+        filtros_canvas.itemconfigure(filtros_window, height=event.height)
+
+    filtros_inner.bind("<Configure>", _actualizar_scrollregion)
+    filtros_canvas.bind("<Configure>", _ajustar_ancho_canvas)
 
     frame_botones = tk.Frame(ventana)
     frame_botones.grid(row=1, column=0, sticky="ew", pady=5)
@@ -1001,10 +1025,18 @@ def abrir_gestion_usuarios(db):
     scrollbar_y = ttk.Scrollbar(tabla_frame, orient="vertical", command=tree.yview)
     scrollbar_y.grid(row=0, column=1, sticky="ns")
 
-    scrollbar_x = ttk.Scrollbar(tabla_frame, orient="horizontal", command=tree.xview)
+    def _sync_xview(*args):
+        tree.xview(*args)
+        filtros_canvas.xview(*args)
+
+    scrollbar_x = ttk.Scrollbar(tabla_frame, orient="horizontal", command=_sync_xview)
     scrollbar_x.grid(row=1, column=0, sticky="ew")
 
-    tree.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+    def _on_tree_xscroll(first, last):
+        scrollbar_x.set(first, last)
+        filtros_canvas.xview_moveto(first)
+
+    tree.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=_on_tree_xscroll)
     tree.tag_configure("has_days_row", foreground="#b00020")
     tree.tag_configure("inactivo_3", foreground="#b35900")
     tree.tag_configure("inactivo_7", foreground="#3b0066")
@@ -1220,11 +1252,11 @@ def abrir_gestion_usuarios(db):
     for col in columnas:
         texto_col = encabezados.get(col, col)
         tree.heading(col, text=texto_col, command=lambda c=col: ordenar_columna(c))
-        tree.column(col, anchor="center", width=110)
+        tree.column(col, anchor="center", width=columnas_widths.get(col, 110))
 
     if "Genero" in columnas:
         tree.heading("Genero", text="Género", command=lambda c="Genero": ordenar_columna(c))
-        tree.column("Genero", width=90, anchor="center")
+        tree.column("Genero", width=columnas_widths.get("Genero", 90), anchor="center")
 
     seleccionar_todos_var = tk.BooleanVar(value=False)
 
