@@ -735,7 +735,7 @@ def abrir_gestion_usuarios(db):
     }
 
     datos_originales = []
-    filtros_activos: Dict[str, Dict[str, Any]] = {}
+    filtros_activos: Dict[str, Set[str]] = {}
     rows_by_iid: Dict[str, Dict[str, str]] = {}
     upcoming_by_uid: Dict[str, List[date]] = defaultdict(list)
     cal_popup: Optional[tk.Toplevel] = None
@@ -1209,167 +1209,26 @@ def abrir_gestion_usuarios(db):
         orden_actual[col] = "desc" if reverse else "asc"
         _actualizar_encabezados()
 
-    def _row_display_value(row: dict, col: str) -> str:
-        if col == "Nombre":
-            valor = row.get("Nombre", "")
-        else:
-            valor = row.get(col, "")
-        if valor is None or str(valor) == "":
+    def row_filter_value(row: dict, col: str) -> str:
+        valor = row.get(col)
+        if valor is None or str(valor).strip() == "":
             return "(Vacías)"
         return str(valor)
-
-    def _migrar_filtros_activos() -> None:
-        for col, estado in list(filtros_activos.items()):
-            if isinstance(estado, set):
-                filtros_activos[col] = {"selected": set(estado), "advanced": None}
-                continue
-            if isinstance(estado, dict):
-                selected = estado.get("selected")
-                if selected is not None and not isinstance(selected, set):
-                    selected = set(selected)
-                filtros_activos[col] = {"selected": selected, "advanced": estado.get("advanced")}
-                continue
-            filtros_activos.pop(col, None)
-
-    def _as_float(valor):
-        try:
-            return float(valor)
-        except Exception:
-            try:
-                return float(str(valor).replace(",", "."))
-            except Exception:
-                return None
-
-    def _as_date(valor):
-        if isinstance(valor, dt.datetime):
-            return valor.date()
-        if isinstance(valor, date):
-            return valor
-        texto = str(valor).strip()
-        if not texto:
-            return None
-        for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y"):
-            try:
-                return dt.datetime.strptime(texto, fmt).date()
-            except Exception:
-                continue
-        return None
-
-    def _as_bool(valor):
-        return str(valor).strip().lower() in ("true", "1", "sí", "si", "yes")
-
-    def _row_matches_advanced(valor_raw, advanced: dict) -> bool:
-        if not advanced:
-            return True
-        tipo = (advanced.get("type") or advanced.get("tipo") or "").lower()
-        operador = (advanced.get("op") or advanced.get("operador") or advanced.get("operator") or "").lower()
-        valor = advanced.get("value") if "value" in advanced else advanced.get("valor")
-        valor2 = advanced.get("value2") if "value2" in advanced else advanced.get("valor2")
-
-        if tipo in ("text", "texto"):
-            texto = "" if valor_raw is None else str(valor_raw)
-            termino = "" if valor is None else str(valor)
-            if operador in ("", "contains", "contiene"):
-                return termino.lower() in texto.lower()
-            if operador in ("not_contains", "no_contiene"):
-                return termino.lower() not in texto.lower()
-            if operador in ("equals", "igual"):
-                return texto == termino
-            if operador in ("not_equals", "distinto"):
-                return texto != termino
-            if operador in ("starts_with", "empieza"):
-                return texto.lower().startswith(termino.lower())
-            if operador in ("ends_with", "termina"):
-                return texto.lower().endswith(termino.lower())
-            if operador in ("empty", "vacio"):
-                return texto == ""
-            if operador in ("not_empty", "no_vacio"):
-                return texto != ""
-            return True
-
-        if tipo in ("number", "numero", "número"):
-            numero = _as_float(valor_raw)
-            if numero is None:
-                return False
-            num_val = _as_float(valor)
-            num_val2 = _as_float(valor2)
-            if operador in ("", "equals", "igual"):
-                return num_val is None or numero == num_val
-            if operador in ("not_equals", "distinto"):
-                return num_val is None or numero != num_val
-            if operador in ("gt", "mayor"):
-                return num_val is not None and numero > num_val
-            if operador in ("gte", "mayor_igual"):
-                return num_val is not None and numero >= num_val
-            if operador in ("lt", "menor"):
-                return num_val is not None and numero < num_val
-            if operador in ("lte", "menor_igual"):
-                return num_val is not None and numero <= num_val
-            if operador in ("between", "entre"):
-                return num_val is not None and num_val2 is not None and num_val <= numero <= num_val2
-            return True
-
-        if tipo in ("date", "fecha"):
-            fecha = _as_date(valor_raw)
-            if fecha is None:
-                return False
-            fecha_val = _as_date(valor)
-            fecha_val2 = _as_date(valor2)
-            if operador in ("", "equals", "igual"):
-                return fecha_val is None or fecha == fecha_val
-            if operador in ("before", "antes"):
-                return fecha_val is not None and fecha < fecha_val
-            if operador in ("after", "despues", "después"):
-                return fecha_val is not None and fecha > fecha_val
-            if operador in ("on_or_before", "antes_igual"):
-                return fecha_val is not None and fecha <= fecha_val
-            if operador in ("on_or_after", "despues_igual", "después_igual"):
-                return fecha_val is not None and fecha >= fecha_val
-            if operador in ("between", "entre"):
-                return fecha_val is not None and fecha_val2 is not None and fecha_val <= fecha <= fecha_val2
-            return True
-
-        if tipo in ("boolean", "booleano", "bool"):
-            bool_val = _as_bool(valor_raw)
-            if operador in ("", "equals", "igual"):
-                if valor is None:
-                    return True
-                return bool_val == _as_bool(valor)
-            if operador in ("is_true", "verdadero"):
-                return bool_val is True
-            if operador in ("is_false", "falso"):
-                return bool_val is False
-            return True
-
-        return True
 
     def _row_matches_filters(row: dict, skip_col: str | None = None) -> bool:
         for col, estado in filtros_activos.items():
             if col == skip_col:
                 continue
-            if not estado:
-                continue
-            selected = estado.get("selected") if isinstance(estado, dict) else None
-            advanced = estado.get("advanced") if isinstance(estado, dict) else None
-            if selected is not None:
-                if not selected:
-                    return False
-                if _row_display_value(row, col) not in selected:
-                    return False
-            if advanced:
-                if not _row_matches_advanced(row.get(col), advanced):
-                    return False
+            if row_filter_value(row, col) not in estado:
+                return False
         return True
 
     def _valores_unicos(col: str) -> list[str]:
         valores = {
-            _row_display_value(row, col)
+            row_filter_value(row, col)
             for row in datos_originales
             if _row_matches_filters(row, skip_col=col)
         }
-        seleccion_actual = filtros_activos.get(col, {}).get("selected")
-        if seleccion_actual:
-            valores.update(seleccion_actual)
         return sorted(valores, key=_convertir_valor_orden)
 
     def _aplicar_orden_actual():
@@ -1386,7 +1245,6 @@ def abrir_gestion_usuarios(db):
 
     def aplicar_filtros():
         _hide_cal_popup()
-        _migrar_filtros_activos()
         tree.delete(*tree.get_children())
         rows_by_iid.clear()
         for row in datos_originales:
@@ -1425,8 +1283,6 @@ def abrir_gestion_usuarios(db):
     def mostrar_filtro_columna(col: str):
         nonlocal filtro_popup
         _cerrar_popup_filtros()
-        _migrar_filtros_activos()
-
         popup = tk.Toplevel(ventana)
         filtro_popup = popup
         popup.title(f"Filtro - {encabezados.get(col, col)}")
@@ -1462,14 +1318,11 @@ def abrir_gestion_usuarios(db):
 
         valores_columna = _valores_unicos(col)
         valores_vars: Dict[str, tk.BooleanVar] = {}
-        seleccion_actual = filtros_activos.get(col, {}).get("selected")
+        seleccion_actual = filtros_activos.get(col)
         seleccionar_todo_var = tk.BooleanVar(value=False)
 
         for valor in valores_columna:
-            if seleccion_actual is not None:
-                seleccionado = valor in seleccion_actual
-            else:
-                seleccionado = True
+            seleccionado = True if seleccion_actual is None else valor in seleccion_actual
             valores_vars[valor] = tk.BooleanVar(value=seleccionado)
 
         def _valores_filtrados():
@@ -1490,16 +1343,28 @@ def abrir_gestion_usuarios(db):
             for valor in _valores_filtrados():
                 valores_vars[valor].set(marcado)
 
+        def _seleccionar_resultados_busqueda():
+            visibles = set(_valores_filtrados())
+            for valor in valores_columna:
+                valores_vars[valor].set(valor in visibles)
+            _actualizar_estado_seleccionar_todo()
+
         seleccionar_todo_cb = ttk.Checkbutton(
             container,
             text="Seleccionar todo",
             variable=seleccionar_todo_var,
             command=_toggle_seleccionar_todo,
         )
-        seleccionar_todo_cb.grid(row=5, column=0, sticky="w", pady=(0, 6))
+        seleccionar_todo_cb.grid(row=5, column=0, sticky="w", pady=(0, 4))
+
+        ttk.Button(
+            container,
+            text="Seleccionar resultados de la búsqueda",
+            command=_seleccionar_resultados_busqueda,
+        ).grid(row=6, column=0, sticky="w", pady=(0, 6))
 
         lista_frame = ttk.Frame(container)
-        lista_frame.grid(row=6, column=0, sticky="nsew")
+        lista_frame.grid(row=7, column=0, sticky="nsew")
         lista_canvas = tk.Canvas(lista_frame, height=200, highlightthickness=0)
         scrollbar_vals = ttk.Scrollbar(lista_frame, orient="vertical", command=lista_canvas.yview)
         lista_canvas.configure(yscrollcommand=scrollbar_vals.set)
@@ -1540,18 +1405,14 @@ def abrir_gestion_usuarios(db):
         _renderizar_lista()
 
         botones = ttk.Frame(container)
-        botones.grid(row=7, column=0, sticky="e", pady=(8, 0))
+        botones.grid(row=8, column=0, sticky="e", pady=(8, 0))
 
         def _aceptar():
             seleccionados = {val for val, var in valores_vars.items() if var.get()}
-            estado_actual = filtros_activos.get(col, {})
-            advanced = estado_actual.get("advanced") if isinstance(estado_actual, dict) else None
-            if seleccionados == set(valores_vars.keys()):
-                seleccionados = None
-            if seleccionados is None and not advanced:
+            if seleccionados == set(valores_columna):
                 filtros_activos.pop(col, None)
             else:
-                filtros_activos[col] = {"selected": seleccionados, "advanced": advanced}
+                filtros_activos[col] = seleccionados
             aplicar_filtros()
             _cerrar_popup_filtros()
 
