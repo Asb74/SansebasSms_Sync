@@ -1511,11 +1511,7 @@ def abrir_gestion_usuarios(db):
 
         def _aceptar():
             seleccionados = {val for val, var in valores_vars.items() if var.get()}
-            valores_base = _valores_base(col)
-            if valores_base and valores_base.issubset(seleccionados):
-                filtros_activos.pop(col, None)
-            else:
-                filtros_activos[col] = FilterState(selected_values=seleccionados)
+            filtros_activos[col] = FilterState(selected_values=seleccionados)
             aplicar_filtros()
             _cerrar_popup_filtros()
 
