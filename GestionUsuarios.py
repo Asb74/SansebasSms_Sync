@@ -1316,6 +1316,14 @@ def abrir_gestion_usuarios(db):
 
     def _valores_base(col: str) -> set[str]:
         # Excel-like: recompute values from original data with all filters except this column.
+        if col == "Genero":
+            valores = {"Hombre", "Mujer", "Otro"}
+            if any(
+                row_filter_value(row, col) == empty_filter_label
+                for row in datos_originales
+            ):
+                valores.add(empty_filter_label)
+            return valores
         return {
             row_filter_value(row, col)
             for row in datos_originales
