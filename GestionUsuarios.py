@@ -8,6 +8,7 @@ from google.api_core.exceptions import AlreadyExists
 import datetime as dt
 from datetime import date, timedelta, timezone
 import re
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional, Union, Dict, Iterable, Tuple, List, Any, Set
 from collections import defaultdict
@@ -735,12 +736,19 @@ def abrir_gestion_usuarios(db):
     }
 
     datos_originales = []
-    filtros_activos: Dict[str, Set[str]] = {}
+    @dataclass(frozen=True)
+    class FilterState:
+        selected_values: Set[str]
+
+    filtros_activos: Dict[str, FilterState] = {}
+    column_types: Dict[str, str] = {}
     rows_by_iid: Dict[str, Dict[str, str]] = {}
     upcoming_by_uid: Dict[str, List[date]] = defaultdict(list)
     cal_popup: Optional[tk.Toplevel] = None
     cal_uid: Optional[str] = None
     dni_dialog_abierto = False
+    empty_filter_label = "(Vacías)"
+    date_columns = {"Alta", "UltimoDia", "Baja"}
 
     def _local_timezone():
         tz = dt.datetime.now().astimezone().tzinfo
@@ -1013,6 +1021,100 @@ def abrir_gestion_usuarios(db):
         base = (nombre or "Falta")
         return ("🔴 " if uid in upcoming_by_uid else "") + base
 
+    def _coerce_bool(value: Any) -> Optional[bool]:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            valor = value.strip().lower()
+            if valor in {"true", "sí", "si", "1", "ok", "yes"}:
+                return True
+            if valor in {"false", "no", "0"}:
+                return False
+        return None
+
+    def _coerce_number(value: Any) -> Optional[float]:
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.replace(",", "."))
+            except Exception:
+                return None
+        return None
+
+    def _coerce_date(value: Any, col: str) -> Optional[date]:
+        if isinstance(value, dt.datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            return parse_access_date(value)
+        if isinstance(value, (int, float)) and col in date_columns:
+            return parse_access_date(value)
+        return None
+
+    def _row_filter_values(row: dict, col: str) -> tuple[Any, str]:
+        # Critical: filters operate on display value, but we keep raw for type detection.
+        raw = row.get(col, "")
+        if col == "Nombre":
+            display = formatear_nombre(row.get("UID", ""), raw)
+        else:
+            display = raw
+        if display is None or str(display).strip() == "":
+            return raw, empty_filter_label
+        return raw, str(display)
+
+    def _infer_column_type(col: str) -> str:
+        muestras: list[Any] = []
+        for row in datos_originales:
+            raw, display = _row_filter_values(row, col)
+            if display == empty_filter_label:
+                continue
+            muestras.append(display if col == "Nombre" else raw)
+            if len(muestras) >= 50:
+                break
+        if not muestras:
+            return "text"
+        if all(_coerce_bool(valor) is not None for valor in muestras):
+            return "bool"
+        if all(_coerce_date(valor, col) is not None for valor in muestras):
+            return "date"
+        if all(_coerce_number(valor) is not None for valor in muestras):
+            return "number"
+        return "text"
+
+    def _actualizar_tipos_columnas() -> None:
+        column_types.clear()
+        for col in columnas:
+            column_types[col] = _infer_column_type(col)
+
+    def _actualizar_tipo_columna(col: str) -> None:
+        column_types[col] = _infer_column_type(col)
+
+    def _sort_key_for_value(value: Any, col: str) -> tuple[int, Any]:
+        if value is None:
+            return (1, "")
+        texto = str(value).strip()
+        if texto == "" or texto == empty_filter_label:
+            return (1, "")
+        tipo = column_types.get(col, "text")
+        if tipo == "number":
+            parsed = _coerce_number(value)
+        elif tipo == "date":
+            parsed = _coerce_date(value, col)
+        elif tipo == "bool":
+            bool_val = _coerce_bool(value)
+            parsed = None if bool_val is None else (1 if bool_val else 0)
+        else:
+            parsed = texto.lower()
+        if parsed is None:
+            parsed = texto.lower()
+        return (0, parsed)
+
     def row_to_values(row: dict) -> list[str]:
         valores: list[str] = []
         for col in columnas:
@@ -1178,15 +1280,6 @@ def abrir_gestion_usuarios(db):
         altura = min(n_rows, max_rows_fit)
         tree.configure(height=altura)
 
-    def _convertir_valor_orden(valor):
-        try:
-            return float(valor)
-        except Exception:
-            try:
-                return dt.datetime.strptime(valor, "%d-%m-%Y")
-            except Exception:
-                return str(valor).lower()
-
     def _actualizar_encabezados():
         for c in columnas:
             texto = encabezados.get(c, c)
@@ -1199,7 +1292,7 @@ def abrir_gestion_usuarios(db):
     def ordenar_columna(col):
         datos = [(tree.set(iid, col), iid) for iid in tree.get_children()]
         reverse = orden_actual[col] == "asc"
-        datos.sort(key=lambda x: _convertir_valor_orden(x[0]), reverse=reverse)
+        datos.sort(key=lambda x: _sort_key_for_value(x[0], col), reverse=reverse)
         for idx, (val, iid) in enumerate(datos):
             tree.move(iid, '', idx)
 
@@ -1210,35 +1303,31 @@ def abrir_gestion_usuarios(db):
         _actualizar_encabezados()
 
     def row_filter_value(row: dict, col: str) -> str:
-        if col == "Nombre":
-            uid = row.get("UID", "")
-            nombre = row.get("Nombre", "")
-            if nombre is None or str(nombre).strip() == "":
-                return "(Vacías)"
-            return formatear_nombre(uid, nombre)
-        valor = row.get(col)
-        if valor is None or str(valor).strip() == "":
-            return "(Vacías)"
-        return str(valor)
+        _, display = _row_filter_values(row, col)
+        return display
 
     def _row_matches_filters(row: dict, skip_col: str | None = None) -> bool:
         for col, estado in filtros_activos.items():
             if col == skip_col:
                 continue
-            if row_filter_value(row, col) not in estado:
+            if row_filter_value(row, col) not in estado.selected_values:
                 return False
         return True
 
-    def _valores_unicos(col: str) -> list[str]:
-        valores = {
+    def _valores_base(col: str) -> set[str]:
+        # Excel-like: recompute values from original data with all filters except this column.
+        return {
             row_filter_value(row, col)
             for row in datos_originales
             if _row_matches_filters(row, skip_col=col)
         }
+
+    def _valores_unicos(col: str) -> list[str]:
+        valores = _valores_base(col)
         seleccionados = filtros_activos.get(col)
         if seleccionados:
-            valores.update(seleccionados)
-        return sorted(valores, key=_convertir_valor_orden)
+            valores.update(seleccionados.selected_values)
+        return sorted(valores, key=lambda valor: _sort_key_for_value(valor, col))
 
     def _aplicar_orden_actual():
         col_orden = next((c for c, orden in orden_actual.items() if orden), None)
@@ -1247,7 +1336,7 @@ def abrir_gestion_usuarios(db):
             return
         reverse = orden_actual[col_orden] == "desc"
         datos = [(tree.set(iid, col_orden), iid) for iid in tree.get_children()]
-        datos.sort(key=lambda x: _convertir_valor_orden(x[0]), reverse=reverse)
+        datos.sort(key=lambda x: _sort_key_for_value(x[0], col_orden), reverse=reverse)
         for idx, (_val, iid) in enumerate(datos):
             tree.move(iid, "", idx)
         _actualizar_encabezados()
@@ -1331,7 +1420,11 @@ def abrir_gestion_usuarios(db):
         seleccionar_todo_var = tk.BooleanVar(value=False)
 
         for valor in valores_columna:
-            seleccionado = True if seleccion_actual is None else valor in seleccion_actual
+            seleccionado = (
+                True
+                if seleccion_actual is None
+                else valor in seleccion_actual.selected_values
+            )
             valores_vars[valor] = tk.BooleanVar(value=seleccionado)
 
         def _valores_filtrados():
@@ -1418,10 +1511,11 @@ def abrir_gestion_usuarios(db):
 
         def _aceptar():
             seleccionados = {val for val, var in valores_vars.items() if var.get()}
-            if seleccionados == set(valores_columna):
+            valores_base = _valores_base(col)
+            if valores_base and valores_base.issubset(seleccionados):
                 filtros_activos.pop(col, None)
             else:
-                filtros_activos[col] = seleccionados
+                filtros_activos[col] = FilterState(selected_values=seleccionados)
             aplicar_filtros()
             _cerrar_popup_filtros()
 
@@ -1510,6 +1604,7 @@ def abrir_gestion_usuarios(db):
                 if fila["UID"] == item_id:
                     fila[col_nombre] = nuevo
                     break
+            _actualizar_tipo_columna(col_nombre)
             actualizar_contador()
         else:
             x, y, width, height = tree.bbox(item_id, column=col)
@@ -1540,6 +1635,7 @@ def abrir_gestion_usuarios(db):
                     rows_by_iid[item_id][col_nombre] = nuevo_valor
                     if col_nombre == "UltimoDia":
                         _apply_row_tags(item_id, rows_by_iid[item_id])
+                _actualizar_tipo_columna(col_nombre)
                 entry.destroy()
 
             entry.bind("<Return>", guardar_valor)
@@ -1774,6 +1870,7 @@ def abrir_gestion_usuarios(db):
             batch.commit()
         t5 = time.time()
 
+        _actualizar_tipos_columnas()
         ajustar_altura_tree()
         actualizar_contador()
 
