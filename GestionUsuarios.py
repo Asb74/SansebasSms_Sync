@@ -1210,6 +1210,12 @@ def abrir_gestion_usuarios(db):
         _actualizar_encabezados()
 
     def row_filter_value(row: dict, col: str) -> str:
+        if col == "Nombre":
+            uid = row.get("UID", "")
+            nombre = row.get("Nombre", "")
+            if nombre is None or str(nombre).strip() == "":
+                return "(Vacías)"
+            return formatear_nombre(uid, nombre)
         valor = row.get(col)
         if valor is None or str(valor).strip() == "":
             return "(Vacías)"
@@ -1229,6 +1235,9 @@ def abrir_gestion_usuarios(db):
             for row in datos_originales
             if _row_matches_filters(row, skip_col=col)
         }
+        seleccionados = filtros_activos.get(col)
+        if seleccionados:
+            valores.update(seleccionados)
         return sorted(valores, key=_convertir_valor_orden)
 
     def _aplicar_orden_actual():
