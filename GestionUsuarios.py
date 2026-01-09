@@ -769,6 +769,7 @@ def abrir_gestion_usuarios(db):
     dni_dialog_abierto = False
     empty_filter_label = "(Vacías)"
     date_columns = {"Alta", "UltimoDia", "Baja"}
+    bool_columns = {"Mensaje", "Seleccionable"}
 
     def _local_timezone():
         tz = dt.datetime.now().astimezone().tzinfo
@@ -1101,6 +1102,10 @@ def abrir_gestion_usuarios(db):
                 break
         if not muestras:
             return "text"
+        if col in bool_columns and any(_coerce_bool(valor) is not None for valor in muestras):
+            return "bool"
+        if col in date_columns and any(_coerce_date(valor, col) is not None for valor in muestras):
+            return "date"
         if all(_coerce_bool(valor) is not None for valor in muestras):
             return "bool"
         if all(_coerce_date(valor, col) is not None for valor in muestras):
@@ -1648,6 +1653,11 @@ def abrir_gestion_usuarios(db):
                 return
 
             operator = operator_var.get()
+            if operator in {"vacías", "no vacías", "hoy", "este mes"}:
+                value1_var.set("")
+                value2_var.set("")
+            elif operator != "entre":
+                value2_var.set("")
             if value1_entry is not None:
                 value1_entry.configure(
                     state="normal" if operator not in {"vacías", "no vacías", "hoy", "este mes"} else "disabled"
