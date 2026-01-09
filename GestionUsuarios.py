@@ -327,6 +327,17 @@ def map_genero(sexo_raw: str | None) -> str:
         return "Mujer"
     return "Otro"
 
+def normalize_genero(value: Any) -> str:
+    texto = s_trim(value)
+    if not texto:
+        return "(Vacías)"
+    minus = texto.casefold()
+    if minus in {"h", "hombre", "masculino", "male"}:
+        return "Hombre"
+    if minus in {"m", "f", "mujer", "femenino", "female"}:
+        return "Mujer"
+    return "Otro"
+
 
 def _normalizar_genero_existente(valor: Optional[str]) -> Optional[str]:
     texto = s_trim(valor)
@@ -1062,6 +1073,8 @@ def abrir_gestion_usuarios(db):
         raw = row.get(col, "")
         if col == "Nombre":
             display = formatear_nombre(row.get("UID", ""), raw)
+        elif col == "Genero":
+            display = normalize_genero(raw)
         else:
             display = raw
         if display is None or str(display).strip() == "":
