@@ -1209,10 +1209,10 @@ def abrir_gestion_usuarios(db):
         orden_actual[col] = "desc" if reverse else "asc"
         _actualizar_encabezados()
 
-    def _row_value(row: dict, col: str) -> str:
+    def _row_display_value(row: dict, col: str) -> str:
         valor = row.get(col, "")
-        if valor is None:
-            return ""
+        if valor is None or str(valor) == "":
+            return "(Vacías)"
         return str(valor)
 
     def _row_matches_filters(row: dict, skip_col: str | None = None) -> bool:
@@ -1221,13 +1221,13 @@ def abrir_gestion_usuarios(db):
                 continue
             if not valores:
                 return False
-            if _row_value(row, col) not in valores:
+            if _row_display_value(row, col) not in valores:
                 return False
         return True
 
     def _valores_unicos(col: str) -> list[str]:
         valores = {
-            _row_value(row, col)
+            _row_display_value(row, col)
             for row in datos_originales
             if _row_matches_filters(row, skip_col=col)
         }
