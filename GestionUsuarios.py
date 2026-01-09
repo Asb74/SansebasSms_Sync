@@ -2000,57 +2000,8 @@ def abrir_gestion_usuarios(db):
         botones.grid(row=9, column=0, sticky="e", pady=(8, 0))
 
         def _aceptar():
-            if modo_var.get() == "condicion":
-                if tipo_col == "bool":
-                    filtro = FilterState(
-                        selected_values=None,
-                        operator="bool",
-                        value1=bool_var.get() == "True",
-                    )
-                    _set_active_filter(col, filtro)
-                else:
-                    operador = operator_var.get()
-                    if not operador:
-                        messagebox.showwarning("Filtro", "Selecciona un operador válido.")
-                        return
-                    valor1: Any = None
-                    valor2: Any = None
-                    if operador not in {"vacías", "no vacías", "hoy", "este mes"}:
-                        valor1_raw = value1_var.get().strip()
-                        if tipo_col == "number":
-                            valor1 = _coerce_number(valor1_raw)
-                        elif tipo_col == "date":
-                            valor1 = parse_access_date(valor1_raw)
-                        else:
-                            valor1 = valor1_raw
-                        if valor1 is None or valor1_raw == "":
-                            messagebox.showwarning("Filtro", "Introduce un valor válido.")
-                            return
-                    if operador == "entre":
-                        valor2_raw = value2_var.get().strip()
-                        if tipo_col == "number":
-                            valor2 = _coerce_number(valor2_raw)
-                        elif tipo_col == "date":
-                            valor2 = parse_access_date(valor2_raw)
-                        else:
-                            valor2 = valor2_raw
-                        if valor2 is None or valor2_raw == "":
-                            messagebox.showwarning(
-                                "Filtro", "Introduce el segundo valor para el rango."
-                            )
-                            return
-                    _set_active_filter(
-                        col,
-                        FilterState(
-                            selected_values=None,
-                            operator=operador,
-                            value1=valor1,
-                            value2=valor2,
-                        ),
-                    )
-            else:
-                seleccionados = {val for val, var in valores_vars.items() if var.get()}
-                _set_active_filter(col, FilterState(selected_values=seleccionados))
+            seleccionados = {val for val, var in valores_vars.items() if var.get()}
+            _set_active_filter(col, FilterState(selected_values=seleccionados))
             aplicar_filtros()
             _cerrar_popup_filtros()
 
